@@ -372,19 +372,27 @@ def start_xray(node):
             },
             {"tag": "direct", "protocol": "freedom", "settings": {}},
         ],
+        # 不用 geoip:private —— 需要 geoip.dat，CI/容器里常缺失会导致 xray 退出码 23。
+        # 改用内网 CIDR 字面量，效果相同且无外部数据依赖。
         "routing": {"rules": [{"type": "field", "outboundTag": "direct",
-                               "ip": ["geoip:private"]}]},
+                               "ip": ["127.0.0.0/8", "10.0.0.0/8",
+                                      "172.16.0.0/12", "192.168.0.0/16",
+                                      "169.254.0.0/16", "::1/128"]}]},
     }
     with open(XRAY_CFG, "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
     log(f"🔗 VLESS 节点: {node['name']} -> {mask_host(node['host'])}:{node['port']}")
+    # 注意：不要用 preexec_fn=os.setsid —— 某些容器里会让 xray 以 exit 23 立即退出
+    # （setsid 后失去控制终端，xray 初始化异常）。改用 start_new_session。
     proc = subprocess.Popen(
         [find_xray(), "run", "-c", XRAY_CFG],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        preexec_fn=os.setsid if not sys.platform.startswith("win") else None,
+        start_new_session=True,
     )
-    time.sleep(2.5)
+    time.sleep(3.0)
     if proc.poll() is not None:
+        # 退出码 23 通常是端口占用或配置问题，打出诊断信息
+        log(f"⚠️ xray 退出码 {proc.returncode}（端口 {SOCKS_PORT} 可能被占用）")
         return None
     return proc
 
