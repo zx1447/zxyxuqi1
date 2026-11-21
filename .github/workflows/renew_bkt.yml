@@ -1,11 +1,11 @@
 name: bkt Renew
 
-# 免费服自动续期（+8h / 次，窗口 = 到期前 2h 或过期后）
-#  · 【2026-11-13 改版】GitHub schedule 调度饿死（全仓 35 个 workflow 抢调度，
-#    20 分钟 cron 实际只送 ~4 次/天），窗口开了没人来 → 服务器过期。
-#    改为"长驻循环 + 自派发接力"：一次触发守 ~5.5h（脚本 --loop 每 20 分钟
-#    复查，窗口开即解算续期），结束时用 GH_PAT 自派发下一轮（workflow_dispatch
-#    不受饿死影响），schedule 仅作兜底。
+# 免费服自动续期（+8h / 次）+ 续期后自动启动
+#  · 频率：单轮 ≤15 分钟，cron 每 6 小时一次（不加自派发接力）。
+#    一次续期 +8h，每 6 小时一轮 → 每次落到窗口内（剩余 ≤2h），可稳定接力。
+#  · 代码在 bkt 分支，workflow 在 main（分支结构约定）。
+#  · 【2026-11-21 修复】此前只续期不启动，服务器一直 stopped。
+#    现在续期成功后 + 每轮巡检都会检查 /stats，是 stopped/offline 就发 /power start。
 #  · browser 解算器 = 家宽订阅出口（xray SOCKS5）+ undetected-chromedriver
 #    真浏览器 + pyautogui 屏幕真点击，续期 POST 在浏览器页面内提交
 #    —— 2026-11-13 实弹成功：PL 家宽出口 → 真点击 → token 794 字符 → +8h
@@ -42,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: bkt          # 代码在 bkt 分支，workflow 在 main
 
       - uses: actions/setup-python@v5
         with:
@@ -70,6 +70,8 @@ jobs:
           BH_CAPSOLVER_KEY: ${{ secrets.BH_CAPSOLVER_KEY }}
           BH_2CAPTCHA_KEY: ${{ secrets.BH_2CAPTCHA_KEY }}
           BH_FORCE: ${{ github.event.inputs.force }}
+          BH_SERVER_ID: ${{ secrets.BH_SERVER_ID || '1188' }}
+          BH_AUTO_START: '1'
           RUN_MINUTES: ${{ github.event.inputs.run_minutes || '14' }}
         run: xvfb-run -a -s "-screen 0 1280x900x24" python renew_bkt.py 
 
@@ -80,6 +82,7 @@ jobs:
           echo "剩余：${{ steps.renew.outputs.seconds_remaining }}s"
           echo "到期：${{ steps.renew.outputs.active_until }}"
           echo "增量：${{ steps.renew.outputs.gain_hours }}h"
+          echo "运行：${{ steps.renew.outputs.server_status }}"
 
       - name: 提交状态
         if: always()
