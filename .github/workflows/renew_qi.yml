@@ -45,7 +45,7 @@ concurrency:
 jobs:
   renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,7 +59,7 @@ jobs:
         env:
           QI_API_KEY: ${{ secrets.QI_API_KEY }}
           QI_WAIT: ${{ inputs.wait == 'false' && '0' || '1' }}
-          QI_WAIT_MAX_MIN: ${{ inputs.wait_max_min || '330' }}
+          QI_WAIT_MAX_MIN: ${{ inputs.wait_max_min || '14' }}
           QI_FORCE: ${{ inputs.force == 'true' && '1' || '0' }}
           QI_DRY_RUN: ${{ inputs.dry_run == 'true' && '1' || '0' }}
           QI_INTERVAL_DAYS: "2"

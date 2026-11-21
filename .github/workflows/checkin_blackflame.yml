@@ -7,7 +7,7 @@ name: BlackFlame Checkin
 #  · 手动 dispatch 可调 run_minutes（>0=持续分钟数；0=按 watches 轮数）
 on:
   schedule:
-    - cron: '25 0,6,12,18 * * *'
+    - cron: '23 */6 * * *'
   workflow_dispatch:
     inputs:
       run_minutes:
@@ -29,7 +29,7 @@ permissions:
 jobs:
   checkin:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 15
     steps:
       # 站点在 TLS/网络层掐大机房 ASN（Azure/GCP 直连被 RST），放行 Cloudflare 等出口
       # → runner 先接入 Cloudflare WARP，以 104.28.x 出口访问
