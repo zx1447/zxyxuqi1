@@ -150,6 +150,8 @@ def restore_encrypted_session(state: dict) -> requests.Session | None:
 
 
 def session_is_valid(session: requests.Session) -> bool:
+    if API_KEY:
+        return True  # API token 不产生 cookie 会话，无需探测
     try:
         response = session.get(SESSION_URL, timeout=20)
         return response.status_code == 200 and bool(response.json().get("user"))
@@ -239,7 +241,9 @@ def main() -> int:
 
     try:
         session = restore_encrypted_session(state)
-        if session is not None and session_is_valid(session):
+        if API_KEY:
+            log("🔑 使用 ARKYA_API_KEY 认证，跳过登录")
+        elif session is not None and session_is_valid(session):
             log("♻️ Arkya 登录会话仍有效，复用现有会话，不重新登录")
         else:
             if session is not None:
