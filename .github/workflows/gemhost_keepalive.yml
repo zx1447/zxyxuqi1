@@ -1,21 +1,32 @@
 name: GemHost Keepalive
 
-# GemHost.pl 免费服守护：检测停止 → 自动拉起（免费服 6h/会话，耗尽自动停机）
-#  · 【2026-11-13 加装甲】15 分钟 cron 被 GitHub schedule 饿死（22h 只送了 1 次）
-#    → 改"330min 长驻循环（30 分钟一轮）+ GH_PAT 自派发接力 + schedule 兜底"（bkt 装甲）
+# GemHost.pl 免费服守护：剩余会话不足就 restart 续期，停机就拉起
+#
+# 【2026-11-21 修复 ★ 重要】
+#   免费会话硬上限 360 分钟，而旧 cron 是每 6 小时一次 —— 两者等长，
+#   意味着每轮之间服务器必然硬停，且停止时长 = GitHub 调度延迟（0~4h）。
+#   更糟的是旧阈值 RENEW_BEFORE_MIN=15 配 14 分钟循环：
+#   07:46 那轮看到剩 136.9min > 15 → 判定「无需动作」，
+#   14 分钟后循环退出，而下次巡检在 6 小时后 → 10:03 硬停，无人管。
+#
+#   现改为：cron 每 3 小时 + 阈值 200 分钟。
+#   360-180=180 < 200 → 每轮必定触发 restart，把 ends_at 重置为满 360 分钟，
+#   单调「现在+3h」复查时仍有 ~180 分钟余量，容得下 GitHub 延迟。
+#   总能耗反而下降：8 轮/天 × ~2 分钟 = 16 分钟/天
+#   （旧：4 轮/天 × 14 分钟 = 56 分钟/天）。
+#
 #  · running/starting 不动，offline 即 start（拉起=新 6h 会话）
-#  · cookie 缓存 gemhost_state.json，变化时回写 gemhost 分支
+#  · cookie 缓存 gemhost_state.json，变化时回写 main
 on:
   schedule:
-    # 只作兜底：每 6 小时一次。主路径是末尾的「自派发接力」。
-    # 原来 15 分钟一次会派发大量 330 分钟任务，排队互挤全变 cancelled。
-    - cron: '53 */6 * * *'
+    # 每 3 小时：必须小于会话时长的一半，否则两轮之间必然停机。
+    - cron: '17 */3 * * *'
   workflow_dispatch:
     inputs:
       run_minutes:
-        description: '本轮守护时长（分钟，默认 330；快测填 3）'
+        description: '本轮上限（分钟，≤15）'
         required: false
-        default: '14'
+        default: '5'
 
 concurrency:
   # 按 ref 隔离：main / axolotl / l3chrane 等各分支互不阻塞。
@@ -39,12 +50,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: 守护循环（每 30 分钟一轮，停机拉起）
+      - name: 会话续期 + 停机拉起
         id: run
         env:
           GEMHOST_EMAIL: ${{ secrets.GEMHOST_EMAIL }}
           GEMHOST_PASSWORD: ${{ secrets.GEMHOST_PASSWORD }}
-          RUN_MINUTES: ${{ github.event.inputs.run_minutes || '14' }}
+          RUN_MINUTES: ${{ github.event.inputs.run_minutes || '5' }}
+          RENEW_BEFORE_MIN: '200'
         run: |
           set +e
           end=$((SECONDS + RUN_MINUTES * 60))
@@ -73,7 +85,7 @@ jobs:
             echo "— [loop] 休眠 $((sl/60)) 分 $((sl%60)) 秒后复查 —"
             sleep $sl
           done
-          echo "— [loop] 本轮预算用尽，交棒下一次运行 —"
+          echo "— [loop] 本轮结束，下一次 cron 3 小时内接管 —"
           exit 0
 
       - name: 回写状态
@@ -84,6 +96,6 @@ jobs:
           if ! git diff --quiet gemhost_state.json 2>/dev/null || ! git diff --cached --quiet gemhost_state.json 2>/dev/null; then
             git add gemhost_state.json
             git commit -m "state: gemhost cookie cache [skip ci]" || true
-            git push origin gemhost || true
+            git push origin HEAD:main || true
           fi
 

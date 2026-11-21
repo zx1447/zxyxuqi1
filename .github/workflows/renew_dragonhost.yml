@@ -57,4 +57,4 @@ jobs:
             exit 0
           fi
           git commit -m "Update DragonHost renewal state [skip ci]"
-          git push origin HEAD:dragonhost
+          git push origin HEAD:main

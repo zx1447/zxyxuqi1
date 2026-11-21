@@ -70,7 +70,7 @@ jobs:
             git fetch -q origin axolotl || true
             git -c user.name='zx-build' -c user.email='build@zx.local' rebase -X theirs origin/axolotl >/dev/null 2>&1 \
               || { git rebase --abort >/dev/null 2>&1 || true; }
-            if git push origin HEAD:axolotl 2>/dev/null; then
+            if git push origin HEAD:main 2>/dev/null; then
               echo "✅ 状态已回写（第 $i 次尝试）"
               exit 0
             fi

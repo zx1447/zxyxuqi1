@@ -61,4 +61,4 @@ jobs:
             exit 0
           fi
           git commit -m "Update Arkya session state [skip ci]"
-          git push origin HEAD:arkya
+          git push origin HEAD:main

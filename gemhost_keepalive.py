@@ -12,8 +12,11 @@
 #     → 拉起即获得新 6 小时会话（免费服会话耗尽自动停机，本脚本巡检拉起）
 #   POST {base}/api/servers/<id>/free/extend-session → 需 captcha，弃用
 #   POST {base}/api/servers/<id>/power {"action":"restart"}
-#     → 实测（2026-11-14）rewrite 免费会话：restart 会把 ends_at 重置为「现在+6h」，
-#       即 restart 等价于「换一个新会话」，不必等停机
+#     → 【2026-11-21 更正】此前记为「restart 会把 ends_at 重置为 now+6h」——这是错的。
+#       实测：restart 会让服务器变 offline 且 free_session 变 None（会话清零，不是重置），
+#       status 一直停在 offline，不会自己起来。
+#       真正能拿到满额会话的是「停机后 start」：start 会分配全新 360 分钟会话。
+#       故改用 stop → start；restart 不再使用。
 #   变更类请求带 X-CSRF-Token: <gemhost_csrf cookie 值>
 #
 # 环境变量：
@@ -27,7 +30,7 @@
 #
 # 新增（2026-11-14）：主动续期
 #   免费会话 6h 一到会硬停机，只靠 offline 才拉起会有断档窗口。
-#   现改为：剩余时间 <= RENEW_BEFORE_MIN 时**主动 restart**，把 ends_at 重置为满 6h，
+#   现改为：剩余时间 <= RENEW_BEFORE_MIN 时**主动 stop→start**，拿一个新的满额会话，
 #   做到无缝续期、永不硬停。
 #   注意巡检间隔必须小于触发阈值，否则两轮之间就漏了 →
 #   因此同时加了 next_wake_seconds 输出，workflow 用它做自适应休眠。
@@ -49,9 +52,9 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Edg/157.0.0.0")
 
 # 视为"活着"的状态；stopping 等本轮放过（下轮自然变 offline 再拉）
-# 剩余会话时间低于此值就主动 restart 续期（分钟）
+# 剩余会话时间低于此值就主动 stop→start 续期（分钟）
 RENEW_BEFORE_MIN = int(os.environ.get("RENEW_BEFORE_MIN", "15"))
-# restart 后等待服务回到 running 的最长秒数
+# 续期后等待服务回到 running 的最长秒数
 RENEW_WAIT_SECONDS = int(os.environ.get("RENEW_WAIT_SECONDS", "90"))
 
 OK_STATES = {"running", "starting"}
@@ -218,12 +221,24 @@ def main():
                 ok += 1
                 continue
 
-            # 到达阈值 → 主动 restart 换新会话
-            log(f"  🔄 剩余仅 {remain_min}min ≤ {RENEW_BEFORE_MIN}min → 主动 restart 续期")
+            # 到达阈值 → stop → start 换新会话
+            # （restart 会清零会话并停在 offline，不可用，见文件头注释）
+            log(f"  🔄 剩余仅 {remain_min}min ≤ {RENEW_BEFORE_MIN}min → stop→start 续期")
             r = sess.request(f"/api/servers/{sid}/power", method="POST",
-                             body={"action": "restart"})
-            log(f"     {json.dumps(r, ensure_ascii=False)[:200]}")
+                             body={"action": "stop"})
+            log(f"     stop: {json.dumps(r, ensure_ascii=False)[:150]}")
+            time.sleep(10)
+            r = sess.request(f"/api/servers/{sid}/power", method="POST",
+                             body={"action": "start"})
+            log(f"     start: {json.dumps(r, ensure_ascii=False)[:150]}")
             status2, fs2 = wait_until_up(sess, sid)
+
+            # 兜底：stop→start 没救回来就再补一次 start（绝不留 offline）
+            if status2 not in OK_STATES:
+                log("     ⚠️ stop→start 未成功，补发一次 start")
+                sess.request(f"/api/servers/{sid}/power", method="POST",
+                             body={"action": "start"})
+                status2, fs2 = wait_until_up(sess, sid)
             ends2 = fs2.get("ends_at") or "-"
             remain2 = fs2.get("remaining_ms")
             remain2_min = round(remain2 / 60000, 1) if isinstance(remain2, (int, float)) else None
