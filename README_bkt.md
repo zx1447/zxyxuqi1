@@ -132,7 +132,7 @@ main 分支:
 
 服务器 11-13 09:33（北京）过期停机约 3 小时。**链路无罪、解算无罪——真凶是 GitHub
 schedule 调度饿死**：`8,28,48` 的 20 分钟 cron 实际只送进来 ~4 次/天（全仓 35 个
-workflow 抢调度，schedule 事件被成批丢弃；同仓 cocalc 3 次/天、octopus 4 次/天）。
+workflow 抢调度，schedule 事件被成批丢弃；同仓其他 workflow 的 schedule 也会占用同一队列）。
 22:53Z 最后一次 gate 还是"未到窗口"，07:33（北京）开窗后 cron 再没来过。
 
 ### 实弹验证（11-13 02:12Z）
