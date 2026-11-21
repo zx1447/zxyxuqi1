@@ -236,9 +236,16 @@ def renew_server(session: requests.Session) -> dict:
             code = ""
         if code == "auth.tokenReadOnly":
             raise ArkyaTokenReadOnly(
-                "API key 只读，无法续期 —— 请到 Arkya 客户端区创建带写权限的 token"
+                "API key 只读，无法续期 —— 请在 Arkya 客户端区创建带写权限的 token"
             )
-        raise ArkyaError(f"Arkya 登录会话失效：HTTP {response.status_code}")
+        if code == "auth.tokenProjectOnly":
+            raise ArkyaTokenReadOnly(
+                "API key 是「限定单项目」类型，无法调用账号级续期接口 "
+                "—— 请新建一个「全站/所有项目」范围的令牌"
+            )
+        if code == "auth.apiTokenRefused":
+            raise ArkyaTokenReadOnly("API key 已被拒绝或吊销 —— 请重新生成")
+        raise ArkyaError(f"Arkya 续期请求被拒：HTTP {response.status_code} {response.text[:200]}")
     if response.status_code not in (200, 201):
         raise ArkyaError(f"Arkya 续期失败：HTTP {response.status_code} {response.text[:300]}")
     try:
