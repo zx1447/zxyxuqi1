@@ -2,13 +2,13 @@ name: BotStable Renew
 
 # BotStable 免费服务器续期
 #   规则：每续一次重置为 now+5天（累加无效，早续会亏）· 剩余 ≤48h 才开放 · 过期保留 7 天
-#   节奏：每 6 小时检查（48h 窗口 + 12h 缓冲，即使 cron 延迟也安全）
+#   节奏：每 5 小时检查；距开放 ≤9 分钟时原地等待，卡在窗口开放瞬间精准续期
 #
 # 注意：GitHub 只对默认分支(main)上的 workflow 运行 cron，也只索引 main 上的 workflow。
 #       因此 workflow 放在 main，代码放在独立的 botstable 分支，checkout 时切过去。
 on:
   schedule:
-    - cron: '23 */6 * * *'
+    - cron: '23 */5 * * *'
   workflow_dispatch:
     inputs:
       force:
@@ -26,7 +26,7 @@ permissions:
 jobs:
   renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
 
     steps:
       - uses: actions/checkout@v4
