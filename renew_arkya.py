@@ -164,6 +164,23 @@ def session_is_valid(session: requests.Session) -> bool:
         return False
 
 
+def log_free_status(session: requests.Session) -> None:
+    """用 token 读真实到期时间，作为续期前/后的比对基准。"""
+    try:
+        r = session.get(f"{API_BASE}/api/resources/{SERVER_ID}", timeout=20)
+        if r.status_code != 200:
+            log(f"ℹ️ 读取资源状态失败：HTTP {r.status_code}")
+            return
+        d = r.json()
+        pr = d.get("pricing", {}) or {}
+        pw = d.get("power", {}) or {}
+        log(f"📅 freeExpiresAt   : {pr.get('freeExpiresAt')}")
+        log(f"📅 freeRenewableAt : {pr.get('freeRenewableAt')}")
+        log(f"🔌 status/power    : {d.get('status')} / {pw.get('state')}")
+    except (requests.RequestException, ValueError) as exc:
+        log(f"ℹ️ 读取资源状态异常：{type(exc).__name__}")
+
+
 def should_run(state: dict) -> bool:
     if FORCE_RUN:
         log("⚡ FORCE_RUN=true，忽略 3 天间隔，立即续期")
@@ -247,6 +264,7 @@ def main() -> int:
         session = restore_encrypted_session(state)
         if API_KEY:
             log("🔑 使用 ARKYA_API_KEY 认证，跳过登录")
+            log_free_status(session)
         elif session is not None and session_is_valid(session):
             log("♻️ Arkya 登录会话仍有效，复用现有会话，不重新登录")
         else:
