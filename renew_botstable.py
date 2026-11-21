@@ -31,6 +31,8 @@ import requests
 BASE = os.environ.get("BOTSTABLE_BASE", "https://botstable.eu").rstrip("/")
 TOKEN = os.environ.get("BOTSTABLE_DISCORD_TOKEN", "").strip()
 FORCE = os.environ.get("FORCE_RUN", "false").strip().lower() == "true"
+# 精准续期：进入工作流后先等 opens_at，卡在窗口开放瞬间续
+WAIT_MAX_MIN = int(os.environ.get("BOTSTABLE_WAIT_MAX_MIN", "9"))
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -198,6 +200,26 @@ def renew(s: requests.Session, server_id) -> dict:
     raise BotStableError(f"续期失败：HTTP {r.status_code} {json.dumps(body, ensure_ascii=False)[:200]}")
 
 
+def wait_until(open_epoch: int, now_epoch: int, max_seconds: int) -> None:
+    """睡到窗口开放。超出 max_seconds 就放弃，交给下一轮 cron。"""
+    delta = open_epoch - now_epoch
+    if delta <= 0:
+        return
+    if delta > max_seconds:
+        log(f"⏳ 距开放还有 {fmt_span(delta)}，超出单轮等待上限 {fmt_span(max_seconds)}")
+        log("   本轮不等待，等下一次 cron 精准命中")
+        raise NotOpenYet(f"还需等待 {fmt_span(delta)}")
+
+    log(f"⏰ 精准等待 {fmt_span(delta)} 到窗口开放…")
+    target = time.time() + delta
+    while True:
+        remain = target - time.time()
+        if remain <= 0:
+            break
+        time.sleep(min(remain, 30))
+    log("🔔 窗口已开放，开始续期")
+
+
 def main() -> int:
     log("=" * 60)
     log("🚀 BotStable 免费服务器自动续期")
@@ -261,10 +283,17 @@ def main() -> int:
                 results.append((name, "renewed"))
             else:
                 if opens_at:
-                    log(f"⏳ 未到窗口，{ts(opens_at)} 开放（还有 {fmt_span(opens_at - now)}）")
+                    log(f"⏰ 将于 {ts(opens_at)} 开放（还有 {fmt_span(opens_at - now)}）")
+                    # 精准续期：能等就等到开放那一刻，等不了就跳过
+                    wait_until(opens_at, now, WAIT_MAX_MIN * 60)
+                    log("✅ 已进入 48h 窗口，发起续期…")
+                    body = renew(s, sid)
+                    new_exp = body["server"].get("expires_at", 0)
+                    log(f"🎉 续期成功，新到期 {ts(new_exp)}（重置为 now+{PERIOD_HOURS}h）")
+                    results.append((name, "renewed"))
                 else:
-                    log("⏳ 未到窗口，跳过")
-                results.append((name, "waiting"))
+                    log("⏳ 站点未给出开放时间，跳过")
+                    results.append((name, "waiting"))
 
         log("")
         log("=" * 60)
