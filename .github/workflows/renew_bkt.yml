@@ -1,8 +1,10 @@
 name: bkt Renew
 
 # 免费服自动续期（+8h / 次）+ 续期后自动启动
-#  · 频率：单轮 ≤15 分钟，cron 每 6 小时一次（不加自派发接力）。
-#    一次续期 +8h，每 6 小时一轮 → 每次落到窗口内（剩余 ≤2h），可稳定接力。
+#  · 【关键机制】每次续期把 activeUntil 重置为「续期时刻 +8h」，不是累加。
+#    所以 6 小时一轮 → 到点时剩 ~2h → 正好在窗口内；push 只延 2h 不会打穿 8h。
+#  · 单轮 ≤15 分钟硬约束，不加自派发接力（用户已否决）。
+#    GitHub 调度延迟会让剩余变成 2.xh，脚本内 wait_for_window() 轮内吸收。
 #  · 代码在 bkt 分支，workflow 在 main（分支结构约定）。
 #  · 【2026-11-21 修复】此前只续期不启动，服务器一直 stopped。
 #    现在续期成功后 + 每轮巡检都会检查 /stats，是 stopped/offline 就发 /power start。
@@ -12,7 +14,7 @@ name: bkt Renew
 #  · 站点常量/订阅地址已在脚本内 b64 混淆，日志脱敏
 on:
   schedule:
-    - cron: '13 */6 * * *'
+    - cron: '17 */6 * * *'
   workflow_dispatch:
     inputs:
       force:
@@ -24,7 +26,7 @@ on:
         required: false
         default: ''
       run_minutes:
-        description: '本轮守护时长（分钟，默认 330）'
+        description: '本轮上限（分钟，≤15）'
         required: false
         default: '14'
 
@@ -48,7 +50,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install xray + Chrome + UC 依赖（长驻循环全程就绪）
+      - name: Install xray + Chrome + UC 依赖
         run: |
           mkdir -p "$HOME/.xray"
           curl -fsSL -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
@@ -61,7 +63,7 @@ jobs:
           pip install --upgrade pip
           pip install undetected-chromedriver pyautogui python-xlib setuptools
 
-      - name: 守护循环（每 20 分钟复查，窗口开即解算续期）
+      - name: 续期 + 确保运行（单轮 ≤15 分钟）
         id: renew
         env:
           BH_COOKIE: ${{ secrets.BH_COOKIE }}
@@ -73,7 +75,8 @@ jobs:
           BH_SERVER_ID: ${{ secrets.BH_SERVER_ID || '1188' }}
           BH_AUTO_START: '1'
           RUN_MINUTES: ${{ github.event.inputs.run_minutes || '14' }}
-        run: xvfb-run -a -s "-screen 0 1280x900x24" python renew_bkt.py 
+          BH_WAIT_WINDOW: '1'
+        run: xvfb-run -a -s "-screen 0 1280x900x24" python renew_bkt.py
 
       - name: 汇总
         if: always()
