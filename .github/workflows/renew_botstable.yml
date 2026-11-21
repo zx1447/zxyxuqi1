@@ -1,0 +1,42 @@
+name: BotStable Renew
+
+# BotStable 免费服务器续期
+#   规则：每续一次重置为 now+5天（累加无效，早续会亏）· 剩余 ≤48h 才开放 · 过期保留 7 天
+#   节奏：每 6 小时检查（48h 窗口 + 12h 缓冲，即使 cron 延迟也安全）
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '强制续期（忽略 48h 窗口，会重置计时器，可能损失剩余时间）'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: botstable-renew
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: pip install -q requests
+
+      - name: 续期
+        env:
+          BOTSTABLE_DISCORD_TOKEN: ${{ secrets.BOTSTABLE_DISCORD_TOKEN }}
+          FORCE_RUN: ${{ github.event.inputs.force || 'false' }}
+        run: python3 renew_botstable.py
