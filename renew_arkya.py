@@ -38,6 +38,11 @@ class ArkyaError(RuntimeError):
     pass
 
 
+class ArkyaTokenReadOnly(ArkyaError):
+    """API key 权限不足，重试登录没有意义。"""
+    pass
+
+
 def log(message: str) -> None:
     print(message, flush=True)
 
@@ -208,16 +213,15 @@ def renew_server(session: requests.Session) -> dict:
     )
     log(f"📡 POST /api/free-servers/{SERVER_ID}/renew -> HTTP {response.status_code}")
     if response.status_code in (401, 403):
-        raise ArkyaError(f"Arkya 登录会话失效：HTTP {response.status_code}")
-    if response.status_code == 403:
         try:
             code = response.json().get("code", "")
         except ValueError:
             code = ""
         if code == "auth.tokenReadOnly":
-            raise ArkyaError(
+            raise ArkyaTokenReadOnly(
                 "API key 只读，无法续期 —— 请到 Arkya 客户端区创建带写权限的 token"
             )
+        raise ArkyaError(f"Arkya 登录会话失效：HTTP {response.status_code}")
     if response.status_code not in (200, 201):
         raise ArkyaError(f"Arkya 续期失败：HTTP {response.status_code} {response.text[:300]}")
     try:
@@ -255,6 +259,8 @@ def main() -> int:
             result = renew_server(session)
         except ArkyaError as exc:
             if "会话失效" not in str(exc):
+                raise
+            if API_KEY:
                 raise
             log("🔐 Arkya 确认会话失效，重新账号密码登录一次后重试")
             session = login_with_password()
