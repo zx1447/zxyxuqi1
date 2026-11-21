@@ -768,6 +768,9 @@ def pick_solver():
 
 
 # ───────────────────────── 运行状态 / 启动 ─────────────────────────
+SERVER_STATUS = {"value": ""}
+
+
 def game_stats():
     """读运行状态：status / stats.status / uptime。"""
     code, body = api(f"/api/v1/servers/game/{SERVER_NUM_ID}/stats", use_pat=True)
@@ -781,6 +784,7 @@ def ensure_started():
         return False, "读不到运行状态"
     status = st.get("status")
     detail = (st.get("stats") or {}).get("status")
+    SERVER_STATUS["value"] = f"{status}/{detail}"
     log(f"🔌 当前运行状态：{status} / {detail}")
     if status in ("running", "starting") or detail in ("running", "starting"):
         log("✅ 服务器已在运行，无需启动")
@@ -847,7 +851,8 @@ def main():
         log(f"⏳ 未到续期窗口 —— 窗口在北京时间 {open_at} 打开（到期前 2h），届时再来")
         save_state(action="wait", seconds_remaining=secs, active_until=exp_at,
                    can_renew=False)
-        out(action="wait", seconds_remaining=secs, active_until=exp_at)
+        out(action="wait", seconds_remaining=secs, active_until=exp_at,
+            server_status=SERVER_STATUS["value"])
         return 0
 
     solver = pick_solver()
