@@ -26,6 +26,7 @@ USER = os.environ.get("ARKYA_USER", "").strip()
 PASSWORD = os.environ.get("ARKYA_PASS", "").strip()
 SESSION_KEY = os.environ.get("ARKYA_SESSION_KEY", "").strip()
 PROXY = os.environ.get("ARKYA_PROXY", "").strip()
+COOKIE = os.environ.get("ARKYA_COOKIE", "").strip()  # 手动提供的 Cookie 串，可绕过登录验证码
 FORCE_RUN = os.environ.get("FORCE_RUN", "false").lower() == "true"
 TG_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
@@ -104,7 +105,30 @@ def save_encrypted_session(state: dict, session: requests.Session) -> None:
     state["session_saved_time"] = now_str()
 
 
+def session_from_cookie() -> requests.Session | None:
+    """用 ARKYA_COOKIE 手工构造会话（登录端点被 Turnstile 挡住时的唯一通道）。"""
+    if not COOKIE:
+        return None
+    session = make_session()
+    for part in COOKIE.split(";"):
+        if "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        name, value = name.strip(), value.strip()
+        if name:
+            session.cookies.set(name, value, domain="api.arkya.gg", path="/")
+            session.cookies.set(name, value, domain="arkya.gg", path="/")
+    if not session_is_valid(session):
+        log("⚠️ ARKYA_COOKIE 已提供但会话无效（可能已过期）")
+        return None
+    log("🍪 使用 ARKYA_COOKIE 建立会话成功")
+    return session
+
+
 def restore_encrypted_session(state: dict) -> requests.Session | None:
+    manual = session_from_cookie()
+    if manual is not None:
+        return manual
     encrypted = state.get("encrypted_cookies")
     if not encrypted or not SESSION_KEY:
         return None
