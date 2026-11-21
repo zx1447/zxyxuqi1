@@ -1,9 +1,9 @@
 name: BlackFlame Checkin
 
 # BlackFlame Studio 一直运行签到（看广告领金币，+5 币/轮，约 35 秒/轮）
-#  · 每天 4 班接力（00:25/06:25/12:25/18:25 UTC），每班持续刷 ~350 分钟
-#  · GitHub 托管 runner 上限 360 分钟/班；concurrency 串行，班次无缝排队
-#  · 脚本在 blackflame 分支；会话约 6h 过期 → 脚本 4h 主动重登
+#  · 每 6 小时一次，单轮 10 分钟（concurrency 串行）
+#  · job timeout 15 分钟，留 5 分钟给 WARP 接入与收尾
+#  · 会话约 6h 过期 → 脚本会自动重登
 #  · 手动 dispatch 可调 run_minutes（>0=持续分钟数；0=按 watches 轮数）
 on:
   schedule:
@@ -13,7 +13,7 @@ on:
       run_minutes:
         description: '持续跑多少分钟（0 = 按 watches 轮数跑）'
         required: false
-        default: '350'
+        default: '10'
       watches:
         description: 'run_minutes=0 时的轮数（每轮约 35 秒，+5 币）'
         required: false
@@ -78,6 +78,6 @@ jobs:
       - name: 持续签到领金币
         env:
           BFLAME_DISCORD_TOKEN: ${{ secrets.BFLAME_DISCORD_TOKEN }}
-          BFLAME_RUN_MINUTES: ${{ inputs.run_minutes || '350' }}
+          BFLAME_RUN_MINUTES: ${{ inputs.run_minutes || '10' }}
           BFLAME_WATCHES: ${{ inputs.watches || '1' }}
         run: python3 checkin_blackflame.py
