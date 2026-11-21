@@ -38,6 +38,11 @@ class ArkyaError(RuntimeError):
     pass
 
 
+class ArkyaCooldown(ArkyaError):
+    """还在 7 天冷却期内，本次跳过属正常，不算失败。"""
+    pass
+
+
 class ArkyaTokenReadOnly(ArkyaError):
     """API key 权限不足，重试登录没有意义。"""
     pass
@@ -246,6 +251,12 @@ def renew_server(session: requests.Session) -> dict:
         if code == "auth.apiTokenRefused":
             raise ArkyaTokenReadOnly("API key 已被拒绝或吊销 —— 请重新生成")
         raise ArkyaError(f"Arkya 续期请求被拒：HTTP {response.status_code} {response.text[:200]}")
+    if response.status_code == 429:
+        try:
+            msg = response.json().get("message", "")
+        except ValueError:
+            msg = response.text[:200]
+        raise ArkyaCooldown(msg or "续期冷却中，尚未到可续期时间")
     if response.status_code not in (200, 201):
         raise ArkyaError(f"Arkya 续期失败：HTTP {response.status_code} {response.text[:300]}")
     try:
@@ -299,6 +310,10 @@ def main() -> int:
         save_state(state)
         log("🎉 Arkya 免费服务器续期成功")
         send_telegram(f"✅ Arkya 服务器续期成功\n🕐 {now_str()}")
+        return 0
+    except ArkyaCooldown as exc:
+        # 冷却期内属正常，绿色退出，不告警
+        log(f"⏳ Arkya 尚未到可续期时间，正常跳过：{exc}")
         return 0
     except Exception as exc:
         log(f"❌ Arkya 自动续期失败：{type(exc).__name__}: {exc}")
