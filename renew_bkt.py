@@ -91,6 +91,9 @@ SOLVER = (os.environ.get("BH_SOLVER") or "auto").strip().lower()
 CAP_KEY = (os.environ.get("BH_CAPSOLVER_KEY") or "").strip()
 TC_KEY = (os.environ.get("BH_2CAPTCHA_KEY") or "").strip()
 FORCE = os.environ.get("BH_FORCE") == "1"
+RUN_MINUTES = int(os.environ.get("RUN_MINUTES") or 14)      # 单轮上限（≤15 分钟硬约束）
+NEAR_WINDOW_SEC = 3 * 3600                                  # 剩余 ≤3h 视为「接近窗口」
+WAIT_WINDOW_DISABLED = os.environ.get("BH_WAIT_WINDOW") == "0"
 SITEKEY = _d("MHg0QUFBQUFBQmRyTW5yZ1lQMTl2QXpU")
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.path.join(HERE, "bkt_state.json")
@@ -801,6 +804,28 @@ def ensure_started():
     return False, f"HTTP {code} {str(body)[:150]}"
 
 
+def wait_for_window(max_wait_sec):
+    """窗口还差一点（调度延迟导致）时，轮内短轮询等它打开，避免整轮空转。
+
+    返回最新的 free/status dict（可能已 canRenew=True）。
+    硬性遵守：单轮总时长 ≤ max_wait_sec，不越过窗口就把判断交回上层。
+    """
+    if max_wait_sec <= 0:
+        return None
+    deadline = time.time() + max_wait_sec
+    while time.time() < deadline:
+        time.sleep(min(60, max(5, deadline - time.time())))
+        fs, err = get_status()
+        if err or not fs:
+            continue
+        secs = fs.get("secondsRemaining") or 0
+        if fs.get("canRenew"):
+            log("✅ 续期窗口已打开")
+            return fs
+        log(f"⏳ 等窗口 · 剩余 {secs/3600:.2f}h（还等 {int(deadline-time.time())}s）")
+    return None
+
+
 # ───────────────────────── 主流程 ─────────────────────────
 def main():
     gate_only = "--gate" in sys.argv
@@ -848,12 +873,25 @@ def main():
             log(("🚀 启动结果：" + note) if started else ("⚠️ 启动失败：" + note))
         open_at = cst((datetime.fromisoformat(exp_at.replace("Z", "+00:00"))
                        - timedelta(hours=2)).astimezone(CST))
-        log(f"⏳ 未到续期窗口 —— 窗口在北京时间 {open_at} 打开（到期前 2h），届时再来")
-        save_state(action="wait", seconds_remaining=secs, active_until=exp_at,
-                   can_renew=False)
-        out(action="wait", seconds_remaining=secs, active_until=exp_at,
-            server_status=SERVER_STATUS["value"])
-        return 0
+
+        # 调度延迟吸收：剩余已接近 2h 阈值 → 轮内等窗口打开（总时长仍 ≤ RUN_MINUTES）
+        near = secs is not None and secs <= NEAR_WINDOW_SEC
+        if near and not WAIT_WINDOW_DISABLED:
+            log(f"⏳ 剩余 {secs/3600:.2f}h ≤ 阈值 {NEAR_WINDOW_SEC/3600:.1f}h，"
+                f"轮内等窗口（最多 {RUN_MINUTES} 分钟）")
+            fs = wait_for_window(RUN_MINUTES * 60 - 60)
+            if fs:
+                can = True
+                secs = fs.get("secondsRemaining")
+                exp_at = fs.get("activeUntil") or exp_at
+        if not can:
+            log(f"⏳ 未到续期窗口 —— 窗口在北京时间 {open_at} 打开（到期前 2h），届时再来")
+            save_state(action="wait", seconds_remaining=secs, active_until=exp_at,
+                       can_renew=False)
+            out(action="wait", seconds_remaining=secs, active_until=exp_at,
+                server_status=SERVER_STATUS["value"])
+            return 0
+        log("🚀 窗口已在本轮内打开，继续解算")
 
     solver = pick_solver()
     if solver == "manual" or solver is None:
