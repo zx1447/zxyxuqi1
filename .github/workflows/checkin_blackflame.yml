@@ -1,0 +1,83 @@
+name: BlackFlame Checkin
+
+# BlackFlame Studio 一直运行签到（看广告领金币，+5 币/轮，约 35 秒/轮）
+#  · 每天 4 班接力（00:25/06:25/12:25/18:25 UTC），每班持续刷 ~350 分钟
+#  · GitHub 托管 runner 上限 360 分钟/班；concurrency 串行，班次无缝排队
+#  · 脚本在 blackflame 分支；会话约 6h 过期 → 脚本 4h 主动重登
+#  · 手动 dispatch 可调 run_minutes（>0=持续分钟数；0=按 watches 轮数）
+on:
+  schedule:
+    - cron: '25 0,6,12,18 * * *'
+  workflow_dispatch:
+    inputs:
+      run_minutes:
+        description: '持续跑多少分钟（0 = 按 watches 轮数跑）'
+        required: false
+        default: '350'
+      watches:
+        description: 'run_minutes=0 时的轮数（每轮约 35 秒，+5 币）'
+        required: false
+        default: '1'
+
+concurrency:
+  group: blackflame-checkin-${{ github.ref_name || 'manual' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      # 站点在 TLS/网络层掐大机房 ASN（Azure/GCP 直连被 RST），放行 Cloudflare 等出口
+      # → runner 先接入 Cloudflare WARP，以 104.28.x 出口访问
+      - name: 接入 Cloudflare WARP
+        run: |
+          set -x
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --dearmor --yes -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-warp.list
+          sudo apt-get update -qq
+          sudo apt-get install -y cloudflare-warp
+          sudo systemctl restart warp-svc || true
+          sleep 3
+          sudo warp-cli --accept-tos --help 2>&1 | head -40 || true
+          sudo warp-cli --accept-tos registration new || true
+          sudo warp-cli --accept-tos mode warp 2>/dev/null || sudo warp-cli --accept-tos set-mode warp 2>/dev/null || true
+          sudo warp-cli --accept-tos connect
+          # 真通判定：cdn-cgi/trace 必须 warp=on（ip 字面量连通，排除 DNS 干扰）
+          ok=0
+          for i in $(seq 1 20); do
+            trace=$(curl -s --max-time 8 https://1.1.1.1/cdn-cgi/trace || true)
+            echo "--- trace try $i ---"; echo "$trace"
+            if echo "$trace" | grep -q 'warp=on'; then ok=1; break; fi
+            sudo warp-cli --accept-tos status || true
+            sudo warp-cli --accept-tos connect || true
+            sleep 3
+          done
+          test "$ok" = 1
+          echo "--- 站点连通性（首连偶发失败，重试判定）---"
+          ok2=0
+          for i in $(seq 1 5); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 https://dashbord.blackflamestudio.us.ci/api/auth/csrf || echo 000)
+            echo "try$i: HTTP $code"
+            if [ "$code" = "200" ]; then ok2=1; break; fi
+            sleep 3
+          done
+          test "$ok2" = 1
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 持续签到领金币
+        env:
+          BFLAME_DISCORD_TOKEN: ${{ secrets.BFLAME_DISCORD_TOKEN }}
+          BFLAME_RUN_MINUTES: ${{ inputs.run_minutes || '350' }}
+          BFLAME_WATCHES: ${{ inputs.watches || '1' }}
+        run: python3 checkin_blackflame.py

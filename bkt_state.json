@@ -1,0 +1,14 @@
+{
+  "action": "wait",
+  "solver": "browser",
+  "proxy": true,
+  "before_seconds": 6616,
+  "after_seconds": 28795,
+  "active_until": "2026-11-20T09:19:16.000Z",
+  "gain_hours": 6.160833333333334,
+  "last_renew": "2026-11-20T01:19:21Z",
+  "updated": "2026-11-20T02:19:29Z",
+  "seconds_remaining": 25186,
+  "can_renew": false,
+  "error": "HTTP 400 {\"success\":false,\"error\":\"Free server renewal is available only 2 hours before session expiration or after it expires.\",\"errorCode\":\"game.freeRenewNotAllowed\"}"
+}
