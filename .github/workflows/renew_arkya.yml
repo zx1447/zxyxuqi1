@@ -44,6 +44,7 @@ jobs:
           ARKYA_SESSION_KEY: ${{ secrets.ARKYA_SESSION_KEY }}
           ARKYA_PROXY: ${{ secrets.ARKYA_PROXY }}
           ARKYA_COOKIE: ${{ secrets.ARKYA_COOKIE }}
+          ARKYA_API_KEY: ${{ secrets.ARKYA_API_KEY }}
           FORCE_RUN: ${{ github.event.inputs.force }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}

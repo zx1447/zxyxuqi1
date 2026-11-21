@@ -27,6 +27,7 @@ PASSWORD = os.environ.get("ARKYA_PASS", "").strip()
 SESSION_KEY = os.environ.get("ARKYA_SESSION_KEY", "").strip()
 PROXY = os.environ.get("ARKYA_PROXY", "").strip()
 COOKIE = os.environ.get("ARKYA_COOKIE", "").strip()  # 手动提供的 Cookie 串，可绕过登录验证码
+API_KEY = os.environ.get("ARKYA_API_KEY", "").strip()  # 只读/读写 API token（ark_ 前缀），首选通道
 FORCE_RUN = os.environ.get("FORCE_RUN", "false").lower() == "true"
 TG_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
@@ -69,6 +70,9 @@ def make_session() -> requests.Session:
         "Referer": f"{APP_BASE}/",
         "Accept": "application/json",
     })
+    if API_KEY:
+        session.headers["Authorization"] = f"Bearer {API_KEY}"
+        log("🔑 使用 ARKYA_API_KEY 认证（跳过登录与验证码）")
     if PROXY:
         session.proxies.update({"http": PROXY, "https": PROXY})
         log("🔗 使用 ARKYA_PROXY")
@@ -126,6 +130,9 @@ def session_from_cookie() -> requests.Session | None:
 
 
 def restore_encrypted_session(state: dict) -> requests.Session | None:
+    if API_KEY:
+        log("🔑 ARKYA_API_KEY 已配置，直接使用 token 认证")
+        return make_session()
     manual = session_from_cookie()
     if manual is not None:
         return manual
@@ -200,6 +207,15 @@ def renew_server(session: requests.Session) -> dict:
     log(f"📡 POST /api/free-servers/{SERVER_ID}/renew -> HTTP {response.status_code}")
     if response.status_code in (401, 403):
         raise ArkyaError(f"Arkya 登录会话失效：HTTP {response.status_code}")
+    if response.status_code == 403:
+        try:
+            code = response.json().get("code", "")
+        except ValueError:
+            code = ""
+        if code == "auth.tokenReadOnly":
+            raise ArkyaError(
+                "API key 只读，无法续期 —— 请到 Arkya 客户端区创建带写权限的 token"
+            )
     if response.status_code not in (200, 201):
         raise ArkyaError(f"Arkya 续期失败：HTTP {response.status_code} {response.text[:300]}")
     try:
