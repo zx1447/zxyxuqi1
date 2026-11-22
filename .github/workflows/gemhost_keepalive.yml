@@ -1,26 +1,17 @@
 name: GemHost Keepalive
 
-# GemHost.pl 免费服守护：剩余会话不足就 restart 续期，停机就拉起
+# GemHost.pl 免费服守护：停了就启动（每 6 小时检查一次）
 #
-# 【2026-11-21 修复 ★ 重要】
-#   免费会话硬上限 360 分钟，而旧 cron 是每 6 小时一次 —— 两者等长，
-#   意味着每轮之间服务器必然硬停，且停止时长 = GitHub 调度延迟（0~4h）。
-#   更糟的是旧阈值 RENEW_BEFORE_MIN=15 配 14 分钟循环：
-#   07:46 那轮看到剩 136.9min > 15 → 判定「无需动作」，
-#   14 分钟后循环退出，而下次巡检在 6 小时后 → 10:03 硬停，无人管。
+# 策略：cron 每 6 小时 → 登录 → 查状态 → offline 就 POST start。
+# 不做主动续期（restart/stop→start 已移除）：
+#   免费会话硬上限 360min，而 GitHub cron 实际派发间隔约 6h，
+#   主动续期只是把停机时刻提前，无法避免停机；
+#   start 一定给满额 360min 会话，cron 兜底拉起最可靠。
 #
-#   现改为：cron 每 3 小时 + 阈值 200 分钟。
-#   360-180=180 < 200 → 每轮必定触发 restart，把 ends_at 重置为满 360 分钟，
-#   单调「现在+3h」复查时仍有 ~180 分钟余量，容得下 GitHub 延迟。
-#   总能耗反而下降：8 轮/天 × ~2 分钟 = 16 分钟/天
-#   （旧：4 轮/天 × 14 分钟 = 56 分钟/天）。
-#
-#  · running/starting 不动，offline 即 start（拉起=新 6h 会话）
-#  · cookie 缓存 gemhost_state.json，变化时回写 main
+# 代码在 gemhost 分支，workflow 在 main（分支结构约定）。
 on:
   schedule:
-    # 每 3 小时：必须小于会话时长的一半，否则两轮之间必然停机。
-    - cron: '17 */3 * * *'
+    - cron: '23 */6 * * *'
   workflow_dispatch:
     inputs:
       run_minutes:
@@ -29,8 +20,6 @@ on:
         default: '5'
 
 concurrency:
-  # 按 ref 隔离：main / axolotl / l3chrane 等各分支互不阻塞。
-  # 同时兼容手动触发（无 ref 事件时回退到固定名）。
   group: gemhost-keepalive-${{ github.ref_name || 'manual' }}
   cancel-in-progress: false
 
@@ -44,48 +33,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: gemhost        # 代码在 gemhost 分支，workflow 在 main
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: 会话续期 + 停机拉起
+      - name: 停机拉起
         id: run
         env:
           GEMHOST_EMAIL: ${{ secrets.GEMHOST_EMAIL }}
           GEMHOST_PASSWORD: ${{ secrets.GEMHOST_PASSWORD }}
           RUN_MINUTES: ${{ github.event.inputs.run_minutes || '5' }}
-          RENEW_BEFORE_MIN: '200'
+          WAKE_SECONDS: '60'
         run: |
           set +e
           end=$((SECONDS + RUN_MINUTES * 60))
           n=0
           while [ $SECONDS -lt $end ]; do
             n=$((n+1))
-            echo "—— [loop] 第 $n 轮（预算剩 $(( (end-SECONDS)/60 )) 分钟）——"
-            # 自适应休眠：脚本按「距离会话到期还剩多久」算出该睡多久，
-            # 保证在剩余时间跌破 15min 阈值之前就醒来，不会漏掉续期窗口。
+            echo "—— [loop] 第 $n 轮 ——"
             GITHUB_OUTPUT=/tmp/gh_out python3 gemhost_keepalive.py
             rc=$?
-            if [ -f /tmp/gh_out ]; then
-              grep '^next_wake_seconds=' /tmp/gh_out | tail -1 | cut -d= -f2 > /tmp/gh_wake || true
-            fi
-            if [ "$rc" = "3" ]; then echo "鉴权/配置死（rc=3），停止守护"; break; fi
+            echo "—— [loop] 退出码 $rc ——"
+            if [ "$rc" = "3" ]; then echo "鉴权/配置死（rc=3），停止"; break; fi
+            # 状态正常（rc=0）就不用继续轮询，直接结束本轮，等下个 cron
+            if [ "$rc" = "0" ]; then break; fi
             rest=$((end - SECONDS))
             [ $rest -le 0 ] && break
-
-            sl=1800
-            if [ -s /tmp/gh_wake ]; then
-              w=$(cat /tmp/gh_wake)
-              case "$w" in ''|*[!0-9]*) w=1800 ;; esac
-              [ "$w" -ge 60 ] && [ "$w" -le 1800 ] && sl=$w
-            fi
-            [ $rest -lt $sl ] && sl=$rest
-            echo "— [loop] 休眠 $((sl/60)) 分 $((sl%60)) 秒后复查 —"
+            sl=60; [ $rest -lt $sl ] && sl=$rest
+            echo "— [loop] 休眠 ${sl}s 后复查 —"
             sleep $sl
           done
-          echo "— [loop] 本轮结束，下一次 cron 3 小时内接管 —"
           exit 0
 
       - name: 回写状态
@@ -96,6 +75,5 @@ jobs:
           if ! git diff --quiet gemhost_state.json 2>/dev/null || ! git diff --cached --quiet gemhost_state.json 2>/dev/null; then
             git add gemhost_state.json
             git commit -m "state: gemhost cookie cache [skip ci]" || true
-            git push origin HEAD:main || true
+            git push origin HEAD:gemhost || true
           fi
-
