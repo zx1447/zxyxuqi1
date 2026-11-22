@@ -1,13 +1,13 @@
 {
-  "action": "wait",
+  "action": "renewed",
   "seconds_remaining": 8249,
-  "active_until": "2026-11-22T15:01:06.000Z",
+  "active_until": "2026-11-23T03:48:20.000Z",
   "can_renew": false,
-  "updated": "2026-11-22T12:56:37Z",
+  "updated": "2026-11-22T19:48:30Z",
   "solver": "browser",
   "proxy": true,
-  "before_seconds": 1649,
-  "after_seconds": 28791,
-  "gain_hours": 7.539444444444444,
-  "last_renew": "2026-11-22T07:01:14Z"
+  "before_seconds": 0,
+  "after_seconds": 28789,
+  "gain_hours": 7.996944444444445,
+  "last_renew": "2026-11-22T19:48:30Z"
 }
