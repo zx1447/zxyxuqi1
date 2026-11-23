@@ -149,17 +149,23 @@ def pass_once():
         log(f"-- [{uuid[:8]}] {name} | suspended={susp} | status={status} --")
 
         # 1) renew：窗口内直接续命
+        #    ⚠️ 续期成功后**必须**接着启动！续期只是延长计划期限，
+        #       服务器不会自己跑起来（用户 2026-11-23 明确要求：续期后再点启动）。
+        renewed = False
         code, d = req(f"{EXT}/renew", method="POST", body={"server": uuid})
         if code == 200:
             log(f"  🚀 renew OK: {json.dumps(d, ensure_ascii=False)[:160]}")
             rows.append((uuid[:8], name, "🚀 已续期", errmsg(d)[:60]))
             ok += 1
-            continue
+            renewed = True
         renew_msg = errmsg(d)
 
         # 2) restore：错过窗口被计划挂起 → 拉回
-        code2, d2 = req(f"{EXT}/restore", method="POST", body={"server": uuid})
-        restored = code2 == 200
+        code2, d2 = (0, {})
+        restored = False
+        if not renewed:
+            code2, d2 = req(f"{EXT}/restore", method="POST", body={"server": uuid})
+            restored = code2 == 200
         if restored:
             log(f"  🆘 restore OK: {json.dumps(d2, ensure_ascii=False)[:160]}")
             rows.append((uuid[:8], name, "🆘 已恢复", errmsg(d2)[:60]))
@@ -170,7 +176,8 @@ def pass_once():
         restore_msg = errmsg(d2)
 
         # 3) 双双"还没到时候"= 健康等待
-        benign = ("less than 8 hours" in renew_msg.lower()
+        benign = (not renewed
+                  and "less than 8 hours" in renew_msg.lower()
                   and "not in plan suspension" in restore_msg.lower())
         if benign:
             log("  ✅ 健康等待（未到续期窗口，未被挂起）")
@@ -181,26 +188,26 @@ def pass_once():
         #      必须发 start 把它唤醒。
         offline_storage = ("use start" in restore_msg.lower()
                            or "stored offline" in restore_msg.lower())
-        if offline_storage:
+        if offline_storage and not renewed:
             log(f"  💤 离线存储（renew 未开窗）→ 需要发 start 唤醒")
             log(f"     renew  : HTTP {code} {renew_msg[:120]}")
             log(f"     restore: HTTP {code2} {restore_msg[:120]}")
             susp = False          # 允许走下面的开机检查
-        elif susp:
+        elif susp and not renewed:
             log(f"  ⏸️ 已挂起（plan suspension），跳过开机检查")
             log(f"     renew  : HTTP {code} {renew_msg[:120]}")
             log(f"     restore: HTTP {code2} {restore_msg[:120]}")
             rows.append((uuid[:8], name, "⏸️",
                          f"挂起中 / restore: {restore_msg[:60]}"))
-        else:
+        elif not renewed:
             log(f"  ❌ renew: HTTP {code} {renew_msg}")
             log(f"  ❌ restore: HTTP {code2} {restore_msg}")
             rows.append((uuid[:8], name, "❌", f"{renew_msg[:40]} / {restore_msg[:40]}"))
 
         # 4) 开机守护
         #    ⚠️ 不能用清单里的 status（恒为 null），必须查 /resources 的 state。
-        #    被 plan suspension 挂起时跳过，避免和 restore 打架。
-        if not susp:
+        #    ★ 续期成功（renewed）后一定要走这里，把服务器点起来。
+        if not susp or renewed:
             state, uptime, mem = get_state(uuid)
             up_h = round(uptime / 3600000, 1)
             log(f"  📊 真实状态: {state} | 已运行 {up_h}h | 内存 {mem}MB")
