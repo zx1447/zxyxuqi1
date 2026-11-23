@@ -176,9 +176,18 @@ def pass_once():
             log("  ✅ 健康等待（未到续期窗口，未被挂起）")
             rows.append((uuid[:8], name, "—", f"等待中（{renew_msg[:40]}）"))
             ok += 1
+        # ⭐ 关键判定：服务端返回 "Use Start to return it without renewing"
+        #    → 说明是「离线存储」状态，不是 plan suspension，restore 用不了，
+        #      必须发 start 把它唤醒。
+        offline_storage = ("use start" in restore_msg.lower()
+                           or "stored offline" in restore_msg.lower())
+        if offline_storage:
+            log(f"  💤 离线存储（renew 未开窗）→ 需要发 start 唤醒")
+            log(f"     renew  : HTTP {code} {renew_msg[:120]}")
+            log(f"     restore: HTTP {code2} {restore_msg[:120]}")
+            susp = False          # 允许走下面的开机检查
         elif susp:
-            # 被挂起时开机没意义，等 restore 成功
-            log(f"  ⏸️ 已挂起，跳过开机检查")
+            log(f"  ⏸️ 已挂起（plan suspension），跳过开机检查")
             log(f"     renew  : HTTP {code} {renew_msg[:120]}")
             log(f"     restore: HTTP {code2} {restore_msg[:120]}")
             rows.append((uuid[:8], name, "⏸️",
@@ -191,7 +200,7 @@ def pass_once():
         # 4) 开机守护
         #    ⚠️ 不能用清单里的 status（恒为 null），必须查 /resources 的 state。
         #    被 plan suspension 挂起时跳过，避免和 restore 打架。
-        if not susp or restored:
+        if not susp:
             state, uptime, mem = get_state(uuid)
             up_h = round(uptime / 3600000, 1)
             log(f"  📊 真实状态: {state} | 已运行 {up_h}h | 内存 {mem}MB")
