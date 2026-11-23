@@ -129,6 +129,32 @@ def power(uuid, signal="start"):
     return False, f"HTTP {code} {errmsg(d)}"
 
 
+def storage_start(uuid):
+    """面板「点启动」的真实接口（2026-11-23 DevTools 实抓）：
+       POST {EXT}/storage/start  body {"server": "<uuid>"}
+       ✅ 200 = 已接受；422 "Wait for the storage transfer" = 存储传输中，别重复发
+       不依赖续期窗口：「不能续」不代表「不能点启动」。
+    返回 (code, msg)。"""
+    try:
+        code, d = req(f"{EXT}/storage/start", method="POST", body={"server": uuid})
+    except Exception as e:  # noqa: BLE001
+        return 0, f"{type(e).__name__}: {e}"
+    return code, errmsg(d)
+
+
+def wait_alive(uuid, tag):
+    """轮询 /resources 直到 running/starting，返回 (final_state, waited)"""
+    waited, final = 0, "?"
+    while waited < POWER_WAIT:
+        time.sleep(8)
+        waited += 8
+        final, fu, fm = get_state(uuid)
+        log(f"     {tag} {waited}s: state={final} 内存={fm}MB")
+        if final in ALIVE_STATES:
+            break
+    return final, waited
+
+
 def pass_once():
     """一轮巡检：renew 优先，restore 兜底。返回 (ok_count, total, rows)"""
     st, lst = req("/api/client/servers")
@@ -175,77 +201,66 @@ def pass_once():
             susp = False          # restore 后已脱离 plan suspension
         restore_msg = errmsg(d2)
 
-        # 3) 双双"还没到时候"= 健康等待
-        benign = (not renewed
-                  and "less than 8 hours" in renew_msg.lower()
-                  and "not in plan suspension" in restore_msg.lower())
-        if benign:
-            log("  ✅ 健康等待（未到续期窗口，未被挂起）")
-            rows.append((uuid[:8], name, "—", f"等待中（{renew_msg[:40]}）"))
-            ok += 1
-        # ⭐ 关键判定：服务端返回 "Use Start to return it without renewing"
-        #    → 说明是「离线存储」状态，不是 plan suspension，restore 用不了，
-        #      必须发 start 把它唤醒。
-        offline_storage = ("use start" in restore_msg.lower()
-                           or "stored offline" in restore_msg.lower())
-        if offline_storage and not renewed:
-            log(f"  💤 离线存储（renew 未开窗）→ 需要发 start 唤醒")
-            log(f"     renew  : HTTP {code} {renew_msg[:120]}")
-            log(f"     restore: HTTP {code2} {restore_msg[:120]}")
-            susp = False          # 允许走下面的开机检查
-        elif susp and not renewed:
-            log(f"  ⏸️ 已挂起（plan suspension），跳过开机检查")
-            log(f"     renew  : HTTP {code} {renew_msg[:120]}")
-            log(f"     restore: HTTP {code2} {restore_msg[:120]}")
-            rows.append((uuid[:8], name, "⏸️",
-                         f"挂起中 / restore: {restore_msg[:60]}"))
-        elif not renewed:
-            log(f"  ❌ renew: HTTP {code} {renew_msg}")
-            log(f"  ❌ restore: HTTP {code2} {restore_msg}")
-            rows.append((uuid[:8], name, "❌", f"{renew_msg[:40]} / {restore_msg[:40]}"))
+        if not renewed:
+            log(f"  · renew : HTTP {code} {renew_msg[:120]}")
+            if not restored:
+                log(f"  · restore: HTTP {code2} {restore_msg[:120]}")
 
-        # 4) 开机守护
-        #    ⚠️ 不能用清单里的 status（恒为 null），必须查 /resources 的 state。
-        #    ★ 续期成功（renewed）后一定要走这里，把服务器点起来。
-        if not susp or renewed:
-            state, uptime, mem = get_state(uuid)
-            up_h = round(uptime / 3600000, 1)
-            log(f"  📊 真实状态: {state} | 已运行 {up_h}h | 内存 {mem}MB")
-            if state in ALIVE_STATES:
-                log("  ✅ 运行中，无需动作")
-            elif state in SKIP_STATES:
-                log(f"  ⏭ 过渡状态（{state}），下轮复查")
-                ok += 1
-            else:
-                log(f"  🔌 未运行（{state}）→ 发送 start")
-                boot_ok, boot_msg = power(uuid, "start")
-                if not boot_ok:
-                    if "suspended" in str(boot_msg).lower():
-                        log(f"  🚫 面板已封禁（suspended），API 无法解除")
-                        log(f"     服务端自称可用 Start 恢复，但 Start 返回 409 suspended")
-                        log(f"     → 需要登录面板人工查看（可能需续期或用面板上的恢复按钮）")
-                        rows.append((uuid[:8], name, "🚫 面板封禁",
-                                     "需人工处理：面板 suspended，start 被 409 拒"))
-                    else:
-                        log(f"  ❌ 开机失败: {boot_msg}")
-                        rows.append((uuid[:8], name, "❌ 开机失败", boot_msg[:50]))
+        # 3) 真实状态（清单 status 恒 null，只能看 /resources）
+        state, uptime, mem = get_state(uuid)
+        up_h = round(uptime / 3600000, 1)
+        log(f"  📊 真实状态: {state} | 已运行 {up_h}h | 内存 {mem}MB")
+
+        if state in ALIVE_STATES:
+            log("  ✅ 运行中，无需动作")
+            rows.append((uuid[:8], name, "✅ 运行中", f"{state} {up_h}h"))
+            ok += 1
+        elif state in SKIP_STATES:
+            log(f"  ⏭ 过渡状态（{state}），下轮复查")
+            rows.append((uuid[:8], name, "⏭ 过渡中", state))
+            ok += 1
+        else:
+            # 4) 没在跑 → 点启动。续期不能替代启动（「不能续不代表不能点启动」）
+            log(f"  🔌 未运行（{state}）→ 面板启动接口 storage/start")
+            scode, smsg = storage_start(uuid)
+            if scode in (200, 204):
+                log(f"  🟢 storage/start 已接受，轮询确认…")
+                final, waited = wait_alive(uuid, "启动")
+                if final in ALIVE_STATES:
+                    rows.append((uuid[:8], name, "🔌 已开机", f"原状态 {state}"))
+                    ok += 1
                 else:
-                    log(f"  🚀 已发开机指令（{boot_msg}），轮询确认…")
-                    final, waited = state, 0
-                    while waited < POWER_WAIT:
-                        time.sleep(8)
-                        waited += 8
-                        final, fu, fm = get_state(uuid)
-                        log(f"     {waited}s: state={final} 内存={fm}MB")
-                        if final in ALIVE_STATES:
-                            break
+                    rows.append((uuid[:8], name, "❌ 开机后仍停机",
+                                 f"{waited}s 后 {final}"))
+            elif "storage transfer" in smsg.lower():
+                log(f"  ⏳ 存储传输中（面板已在启动）→ 等待，不重复发")
+                final, waited = wait_alive(uuid, "传输")
+                if final in ALIVE_STATES:
+                    rows.append((uuid[:8], name, "🔌 已开机", "传输完成后启动"))
+                    ok += 1
+                else:
+                    rows.append((uuid[:8], name, "⏳ 传输中",
+                                 f"{waited}s 后 {final}，下轮复查"))
+                    ok += 1
+            else:
+                log(f"  ❌ storage/start: HTTP {scode} {smsg[:120]}")
+                # 兜底：标准 power 接口
+                boot_ok, boot_msg = power(uuid, "start")
+                if boot_ok:
+                    final, waited = wait_alive(uuid, "power")
                     if final in ALIVE_STATES:
-                        rows.append((uuid[:8], name, "🔌 已开机",
-                                     f"原状态 {state}"))
+                        rows.append((uuid[:8], name, "🔌 已开机", "power 兜底"))
                         ok += 1
                     else:
                         rows.append((uuid[:8], name, "❌ 开机后仍停机",
                                      f"{waited}s 后 {final}"))
+                elif "suspended" in str(boot_msg).lower():
+                    log(f"  🚫 面板封禁（suspended），API 无法解除")
+                    rows.append((uuid[:8], name, "🚫 面板封禁",
+                                 "需人工处理：storage/start 与 power 均被拒"))
+                else:
+                    log(f"  ❌ 开机失败: {boot_msg}")
+                    rows.append((uuid[:8], name, "❌ 开机失败", boot_msg[:50]))
         time.sleep(1)
     return ok, len(servers), rows
 
