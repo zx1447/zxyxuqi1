@@ -216,11 +216,33 @@ def main():
             continue
 
         log(f"  🚀 检测到停止 → 拉起")
-        r = sess.request(f"/api/servers/{sid}/power", method="POST",
-                         body={"action": "start"})
-        log(f"     {json.dumps(r, ensure_ascii=False)[:200]}")
-        time.sleep(8)
-        stt2 = sess.request(f"/api/servers/{sid}/status")
+        # 最多试 3 次：CI 上偶发网络抖动会让 urlopen 直接抛异常，
+        # 原来抛出去会被外层吞掉 → 日志里只有「检测到停止」却没有任何响应体
+        started = False
+        for attempt in (1, 2, 3):
+            try:
+                r = sess.request(f"/api/servers/{sid}/power", method="POST",
+                                 body={"action": "start"})
+                log(f"     [{attempt}] start 响应: "
+                    f"{json.dumps(r, ensure_ascii=False)[:200]}")
+                started = True
+                break
+            except Exception as exc:            # noqa: BLE001
+                log(f"     [{attempt}] start 异常: {type(exc).__name__}: {exc}")
+                time.sleep(3 * attempt)
+        if not started:
+            log("     ⚠️ start 三次均失败，补发最后一次")
+            try:
+                sess.request(f"/api/servers/{sid}/power", method="POST",
+                             body={"action": "start"})
+            except Exception as exc:            # noqa: BLE001
+                log(f"     补发也失败: {type(exc).__name__}: {exc}")
+        time.sleep(10)
+        try:
+            stt2 = sess.request(f"/api/servers/{sid}/status")
+        except Exception as exc:                # noqa: BLE001
+            log(f"     复查失败: {type(exc).__name__}: {exc}")
+            stt2 = {}
         status2 = (stt2.get("status") or "?").lower()
         fs2 = stt2.get("free_session") or {}
         ends2 = fs2.get("ends_at") or "-"
@@ -230,6 +252,7 @@ def main():
             rows.append((sid, name, status, "🚀 已拉起", ends2))
         else:
             rows.append((sid, name, status, f"❌ 拉起后 {status2}", ends2))
+            log(f"     ❌ 拉起未成功，状态仍为 {status2}")
         time.sleep(1)
 
     save_state(sess, seen)
