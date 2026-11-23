@@ -3,12 +3,10 @@ on: { workflow_dispatch: }
 jobs:
   d:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - env:
           ACORE_API_KEY: ${{ secrets.ACORE_API_KEY }}
         run: |
-          python3 acore_diag.py || true
-          echo "=================="
-          python3 acore_diag2.py || true
+          python3 acore_diag3.py || true
