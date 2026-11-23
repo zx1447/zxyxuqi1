@@ -213,8 +213,15 @@ def pass_once():
                 log(f"  🔌 未运行（{state}）→ 发送 start")
                 boot_ok, boot_msg = power(uuid, "start")
                 if not boot_ok:
-                    log(f"  ❌ 开机失败: {boot_msg}")
-                    rows.append((uuid[:8], name, "❌ 开机失败", boot_msg[:50]))
+                    if "suspended" in str(boot_msg).lower():
+                        log(f"  🚫 面板已封禁（suspended），API 无法解除")
+                        log(f"     服务端自称可用 Start 恢复，但 Start 返回 409 suspended")
+                        log(f"     → 需要登录面板人工查看（可能需续期或用面板上的恢复按钮）")
+                        rows.append((uuid[:8], name, "🚫 面板封禁",
+                                     "需人工处理：面板 suspended，start 被 409 拒"))
+                    else:
+                        log(f"  ❌ 开机失败: {boot_msg}")
+                        rows.append((uuid[:8], name, "❌ 开机失败", boot_msg[:50]))
                 else:
                     log(f"  🚀 已发开机指令（{boot_msg}），轮询确认…")
                     final, waited = state, 0
