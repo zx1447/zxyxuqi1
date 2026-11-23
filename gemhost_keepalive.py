@@ -138,6 +138,19 @@ def login(sess):
     return True
 
 
+def session_alive(sess):
+    """缓存 cookie 是否还能用：能拉到服务器列表就算活。"""
+    if not sess.cookies:
+        return False
+    try:
+        lst = sess.request("/api/servers/list")
+        return bool((lst.get("servers") is not None)
+                    or lst.get("success")
+                    or "servers" in json.dumps(lst, ensure_ascii=False).lower())
+    except Exception:                              # noqa: BLE001
+        return False
+
+
 def wait_until_up(sess, sid, limit=RENEW_WAIT_SECONDS):
     """轮询到服务回到 OK_STATES，返回 (status, free_session)。"""
     waited = 0
