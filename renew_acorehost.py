@@ -159,11 +159,14 @@ def pass_once():
 
         # 2) restore：错过窗口被计划挂起 → 拉回
         code2, d2 = req(f"{EXT}/restore", method="POST", body={"server": uuid})
-        if code2 == 200:
+        restored = code2 == 200
+        if restored:
             log(f"  🆘 restore OK: {json.dumps(d2, ensure_ascii=False)[:160]}")
             rows.append((uuid[:8], name, "🆘 已恢复", errmsg(d2)[:60]))
             ok += 1
-            continue
+            # ⚠️ 不要 continue：restore 之后服务器可能是 restoring/offline，
+            #    必须继续走下面的「开机检查」，否则会一直躺着不起来。
+            susp = False          # restore 后已脱离 plan suspension
         restore_msg = errmsg(d2)
 
         # 3) 双双"还没到时候"= 健康等待
@@ -176,7 +179,10 @@ def pass_once():
         elif susp:
             # 被挂起时开机没意义，等 restore 成功
             log(f"  ⏸️ 已挂起，跳过开机检查")
-            rows.append((uuid[:8], name, "⏸️", f"挂起中（{renew_msg[:40]}）"))
+            log(f"     renew  : HTTP {code} {renew_msg[:120]}")
+            log(f"     restore: HTTP {code2} {restore_msg[:120]}")
+            rows.append((uuid[:8], name, "⏸️",
+                         f"挂起中 / restore: {restore_msg[:60]}"))
         else:
             log(f"  ❌ renew: HTTP {code} {renew_msg}")
             log(f"  ❌ restore: HTTP {code2} {restore_msg}")
@@ -185,7 +191,7 @@ def pass_once():
         # 4) 开机守护
         #    ⚠️ 不能用清单里的 status（恒为 null），必须查 /resources 的 state。
         #    被 plan suspension 挂起时跳过，避免和 restore 打架。
-        if not susp:
+        if not susp or restored:
             state, uptime, mem = get_state(uuid)
             up_h = round(uptime / 3600000, 1)
             log(f"  📊 真实状态: {state} | 已运行 {up_h}h | 内存 {mem}MB")
