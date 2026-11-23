@@ -1,6 +1,14 @@
 name: GemHost Keepalive
 
-# GemHost.pl 免费服守护：停了就启动（每 6 小时检查一次）
+# GemHost.pl 免费服守护：长驻巡检，会话到期前主动续期
+#
+# 【2026-11-23 修复 ★】此前是「每 6 小时 cron + 只做停了就启动」，
+#   但免费会话硬上限 360 分钟，而 cron 实际派发间隔约 6 小时（`*/6` 会被饿），
+#   两者等长 → 每轮之间必然停机 0~6 小时，用户实测「又停了」。
+#   现改为长驻：单轮驻留 DWELL_MINUTES（默认 60）分钟，每 60 秒巡检，
+#   剩余 <20 分钟就 stop→start 换满额会话 —— 驻留窗口内绝不让会话耗尽。
+#   实测：stop→start 每次都拿到 358~360 分钟，且不会出现 offline。
+#   ⚠️ restart 不可用（会 offline + free_session=None 且不自愈）。
 #
 # 策略：cron 每 6 小时 → 登录 → 查状态 → offline 就 POST start。
 # 不做主动续期（restart/stop→start 已移除）：
@@ -29,7 +37,7 @@ permissions:
 jobs:
   keepalive:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,33 +47,14 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: 停机拉起
+      - name: 长驻巡检（到期前续期 + 停机拉起）
         id: run
         env:
           GEMHOST_EMAIL: ${{ secrets.GEMHOST_EMAIL }}
           GEMHOST_PASSWORD: ${{ secrets.GEMHOST_PASSWORD }}
           RUN_MINUTES: ${{ github.event.inputs.run_minutes || '5' }}
           WAKE_SECONDS: '60'
-        run: |
-          set +e
-          end=$((SECONDS + RUN_MINUTES * 60))
-          n=0
-          while [ $SECONDS -lt $end ]; do
-            n=$((n+1))
-            echo "—— [loop] 第 $n 轮 ——"
-            GITHUB_OUTPUT=/tmp/gh_out python3 gemhost_keepalive.py
-            rc=$?
-            echo "—— [loop] 退出码 $rc ——"
-            if [ "$rc" = "3" ]; then echo "鉴权/配置死（rc=3），停止"; break; fi
-            # 状态正常（rc=0）就不用继续轮询，直接结束本轮，等下个 cron
-            if [ "$rc" = "0" ]; then break; fi
-            rest=$((end - SECONDS))
-            [ $rest -le 0 ] && break
-            sl=60; [ $rest -lt $sl ] && sl=$rest
-            echo "— [loop] 休眠 ${sl}s 后复查 —"
-            sleep $sl
-          done
-          exit 0
+        run: python3 gemhost_dwell.py
 
       - name: 回写状态
         if: always()
