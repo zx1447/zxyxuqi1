@@ -16,8 +16,9 @@ python nshst_probe.py
 
 设置环境变量 `NSHST_API_KEY` 后运行。工作流在 main：`.github/workflows/nshst_probe.yml`，仅手动触发。
 
-## 自动检查与启动
 
-- main 的 `.github/workflows/nshst_keepalive.yml` 每 6 小时检查一次，也可手动触发；无自派发。
-- `nshst_keepalive.py` 通过客户端 API 逐台查询实际运行状态，非 running 时尝试发送 start，随后重新查询确认 running；失败则退出报错。
-- **不等于自动续期**：官方 FAQ 表示免费计划至少每 7 天登录面板，忘记后有 72 小时缓冲；当前 API 未提供到期信息，API 调用能否算作面板登录也没有证据。请定期手动登录面板，直至核实。
+## 续期与启动
+
+用户要求仅在续期成功并核实后检查、必要时启动，不设置独立定时启动检查。
+官方 FAQ 表示免费计划至少每 7 天登录面板，忘记后有 72 小时缓冲；当前 API 未提供到期信息，API 调用是否算作面板登录未验证。
+自动续期尚未实现；请定期手动登录面板，直到验证可用的续期方式。
