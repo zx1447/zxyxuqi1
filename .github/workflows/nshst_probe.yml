@@ -1,0 +1,20 @@
+name: NSHST Status Probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: nshst
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 查询服务器（只读）
+        env:
+          NSHST_API_KEY: ${{ secrets.NSHST_API_KEY }}
+        run: python nshst_probe.py
