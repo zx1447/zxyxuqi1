@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 # CoalByte 自动续期（Pelican 免费游戏服）
 #
-# 机制（2026-11-12 实测）：
-#   POST {base}/api/pelican/renew  body {"serverId":"<identifier>","email":"<邮箱>"}
-#   → {"success":true,"expiresAt":"<now+5d>","remainingSeconds":432000,
-#      "message":"Server successfully renewed for 5 days!"}
-#   · 到期 = 现在 + 5 天（不叠加，重复续期只是不断重置）
-#   · 无认证、无冷却（实测连打即过）；email 字段可省（浏览器带，后端不校验）
-#   GET {base}/api/pelican/servers?email=<邮箱>  → 名下全部服务器 + 续期状态
-#   · 面板本体 panel.coalbyte.fun（Pelican），coalbyte.com 是前端壳
+# 续期请求必须携带 serverType：minecraft 当前为 90 分钟，discord 为 5 天。
+# 续期后核对单服和列表数据，随后用 WebSocket 检查实际状态；没启动则发 start。
+# 即使续期失败也尝试启动。续期计划 cron 保持原样。
 #
 # 环境变量：
 #   COALBYTE_EMAIL     可选  用于自动发现名下全部服务器（推荐）
@@ -25,6 +20,7 @@ import sys
 import time
 import urllib.request
 import urllib.parse
+import websocket
 
 BASE = os.environ.get("COALBYTE_BASE", "https://coalbyte.com").rstrip("/")
 EMAIL = os.environ.get("COALBYTE_EMAIL", "").strip()
@@ -68,19 +64,80 @@ def discover():
         for s in d.get("servers", []):
             r = s.get("renewal") or {}
             out.append((s["identifier"], s.get("name", "?"),
-                        r.get("expiresAt"), r.get("canRenew")))
+                        r.get("expiresAt"), r.get("canRenew"), (s.get("service") or {}).get("type")))
     for sid in SERVERS:
         if not any(o[0] == sid for o in out):
-            out.append((sid, "(手动指定)", None, None))
+            detail = req(f"{BASE}/api/pelican/server?" + urllib.parse.urlencode({"id": sid}))
+            info = detail.get("server") or {}
+            out.append((sid, "(手动指定)", None, None, (info.get("service") or {}).get("type")))
     return out
 
 
-def renew(server_id, email):
-    body = {"serverId": server_id}
+def renew(server_id, email, server_type):
+    if not server_type:
+        raise ValueError("无法确定服务器类型，拒绝按错误类型续期")
+    body = {"serverId": server_id, "serverType": server_type}
     if email:
         body["email"] = email
     return req(f"{BASE}/api/pelican/renew", method="POST",
                data=json.dumps(body).encode())
+
+
+def real_state(ident):
+    """使用真实 Wings WebSocket 状态，不依赖列表的默认 online 字段。"""
+    creds = req(f"{BASE}/api/pelican/websocket?" + urllib.parse.urlencode({"id": ident}), retries=1)
+    if not creds.get("socket") or not creds.get("token"):
+        raise RuntimeError("WebSocket 凭据不可用")
+    ws = websocket.create_connection(creds["socket"], timeout=15, origin=BASE,
+                                     http_no_proxy=["*"])
+    try:
+        ws.send(json.dumps({"event": "auth", "args": [creds["token"]]}))
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            msg = json.loads(ws.recv())
+            event, args = msg.get("event"), msg.get("args") or []
+            if event == "auth success":
+                ws.send(json.dumps({"event": "send stats", "args": [None]}))
+            elif event == "status" and args:
+                return str(args[0]).lower()
+            elif event == "stats" and args:
+                stats = json.loads(args[0]) if isinstance(args[0], str) else args[0]
+                if isinstance(stats, dict) and stats.get("state"):
+                    return str(stats["state"]).lower()
+            elif event in ("auth error", "daemon error"):
+                raise RuntimeError("WebSocket 鉴权或节点错误")
+        raise RuntimeError("WebSocket 未返回状态")
+    finally:
+        ws.close()
+
+
+def ensure_running(ident):
+    try:
+        state = real_state(ident)
+        log(f"  🖥 实际电源状态: {state}")
+    except Exception as exc:
+        state = None
+        log(f"  ⚠️ 无法读取实际状态: {type(exc).__name__}")
+    if state == "running":
+        return True
+    if state != "starting":
+        try:
+            result = req(f"{BASE}/api/pelican/power", method="POST", retries=1,
+                         data=json.dumps({"id": ident, "signal": "start"}).encode())
+            log(f"  🚀 启动请求: {result.get('message') or result.get('error') or result.get('success')}")
+        except Exception as exc:
+            log(f"  ❌ 启动请求异常: {type(exc).__name__}")
+    for attempt in range(3):
+        time.sleep(15)
+        try:
+            state = real_state(ident)
+            log(f"  🖥 启动复查: {state}")
+            if state == "running":
+                return True
+        except Exception as exc:
+            log(f"  ⚠️ 启动复查失败: {type(exc).__name__}")
+    log("  ❌ 未确认服务器达到 running")
+    return False
 
 
 def as_timestamp(value):
@@ -132,26 +189,28 @@ def main():
     log(f"== CoalByte 续期 x{len(servers)}（{BASE}）==")
     ok = 0
     rows = []
-    for ident, name, exp, can in servers:
-        log(f"-- [{ident}] {name}（到期 {exp or '?'} · canRenew={can}）--")
+    for ident, name, exp, can, server_type in servers:
+        log(f"-- [{ident}] {name}（类型 {server_type or '?'} · 列表到期 {exp or '?'} · canRenew={can}）--")
+        verified, detail = False, "未尝试"
         try:
-            d = renew(ident, EMAIL)
-        except Exception as e:  # noqa: BLE001
-            log(f"  ❌ 请求失败: {e}")
-            rows.append((ident, name, "失败", str(e)))
-            continue
-        if d.get("success"):
-            verified, detail = verify_renewal(ident, exp, d)
-            if verified:
-                ok += 1
-                log(f"  ✅ 独立核验通过 → 到期 {detail}")
-                rows.append((ident, name, "✅", detail))
+            d = renew(ident, EMAIL, server_type)
+            if d.get("success"):
+                verified, detail = verify_renewal(ident, exp, d)
+                if verified:
+                    log(f"  ✅ 独立核验通过 → 到期 {detail}")
+                else:
+                    log(f"  ❌ 续期未核验: {detail}")
             else:
-                log(f"  ❌ 续期未核验: {detail}")
-                rows.append((ident, name, "❌ 未核验", detail))
-        else:
-            log(f"  ❌ {d.get('error') or d}")
-            rows.append((ident, name, "❌", d.get("error", "?")))
+                detail = str(d.get("error") or "续期接口拒绝")
+                log(f"  ❌ {detail}")
+        except Exception as exc:
+            detail = f"续期请求失败: {type(exc).__name__}"
+            log(f"  ❌ {detail}")
+        # 无论续期是否成功，都检查实际运行状态并尽力启动。
+        running = ensure_running(ident)
+        if verified and running:
+            ok += 1
+        rows.append((ident, name, "✅" if verified and running else "❌ 未核验", detail))
         time.sleep(1)
 
     log(f"\n== 完成 {ok}/{len(servers)} ==")
