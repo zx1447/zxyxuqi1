@@ -1,13 +1,13 @@
 {
   "action": "renewed",
   "seconds_remaining": 8249,
-  "active_until": "2026-11-26T05:48:28.000Z",
+  "active_until": "2026-11-26T16:31:54.000Z",
   "can_renew": false,
-  "updated": "2026-11-25T21:48:36Z",
+  "updated": "2026-11-26T08:32:04Z",
   "solver": "browser",
   "proxy": true,
   "before_seconds": 0,
-  "after_seconds": 28791,
-  "gain_hours": 7.9975,
-  "last_renew": "2026-11-25T21:48:36Z"
+  "after_seconds": 28789,
+  "gain_hours": 7.996944444444445,
+  "last_renew": "2026-11-26T08:32:04Z"
 }
