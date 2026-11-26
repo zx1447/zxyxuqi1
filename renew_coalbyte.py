@@ -18,6 +18,7 @@
 # 退出码：0 全部成功；2 有失败；3 没有可续的服务器/配置
 
 import json
+from datetime import datetime
 import os
 import re
 import sys
@@ -82,6 +83,46 @@ def renew(server_id, email):
                data=json.dumps(body).encode())
 
 
+def as_timestamp(value):
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def verify_renewal(ident, previous, response):
+    """不要只相信 POST：分别核对单服续期和名下列表的数据。"""
+    expected = as_timestamp(response.get("expiresAt"))
+    old = as_timestamp(previous)
+    if expected is None or (old is not None and expected <= old):
+        return False, "续期返回的到期时间没有推进"
+    reason = "无核验结果"
+    for attempt in range(2):
+        try:
+            direct = req(f"{BASE}/api/pelican/renew?" + urllib.parse.urlencode({"id": ident}), retries=1)
+            direct_exp = direct.get("expiresAt")
+            direct_t = as_timestamp(direct_exp)
+            if not direct.get("success") or direct_t is None or abs(direct_t - expected) > 5:
+                reason = f"单服查询与续期结果不一致: {direct_exp}"
+            elif EMAIL:
+                listing = req(f"{BASE}/api/pelican/servers?" + urllib.parse.urlencode({"email": EMAIL}), retries=1)
+                record = next((x for x in listing.get("servers", []) if x.get("identifier") == ident), None)
+                listed = (record or {}).get("renewal") or {}
+                listed_exp = listed.get("expiresAt")
+                listed_t = as_timestamp(listed_exp)
+                if not listing.get("userFound") or not record or listed_t is None or abs(listed_t - expected) > 5:
+                    reason = f"列表与单服续期数据不一致: 列表={listed_exp}, 单服={direct_exp}"
+                else:
+                    return True, direct_exp
+            else:
+                return True, direct_exp
+        except Exception as exc:
+            reason = f"核验请求失败: {type(exc).__name__}"
+        if attempt == 0:
+            time.sleep(4)
+    return False, reason
+
+
 def main():
     servers = discover()
     if not servers:
@@ -100,9 +141,14 @@ def main():
             rows.append((ident, name, "失败", str(e)))
             continue
         if d.get("success"):
-            ok += 1
-            log(f"  ✅ {d.get('message')} → 到期 {d.get('expiresAt')}（剩 {d.get('remainingSeconds')}s）")
-            rows.append((ident, name, "✅", d.get("expiresAt")))
+            verified, detail = verify_renewal(ident, exp, d)
+            if verified:
+                ok += 1
+                log(f"  ✅ 独立核验通过 → 到期 {detail}")
+                rows.append((ident, name, "✅", detail))
+            else:
+                log(f"  ❌ 续期未核验: {detail}")
+                rows.append((ident, name, "❌ 未核验", detail))
         else:
             log(f"  ❌ {d.get('error') or d}")
             rows.append((ident, name, "❌", d.get("error", "?")))
