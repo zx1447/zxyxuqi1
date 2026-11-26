@@ -84,6 +84,9 @@ def main():
         try:
             resp = page.goto(BASE + '/login', wait_until='domcontentloaded', timeout=45000)
             log('登录页 HTTP', resp.status if resp else '未知', '标题:', page.title()[:80])
+            if resp is not None and resp.status in (403, 429):
+                log('❌ 登录页被站点安全防护拦截')
+                return 2
             stage = '寻找账号输入框'
             page.locator('#identifier').fill(email, timeout=20000)
             stage = '填写密码与安全验证'
