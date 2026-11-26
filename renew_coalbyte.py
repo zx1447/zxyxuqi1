@@ -127,7 +127,7 @@ def ensure_running(ident):
             log(f"  🚀 启动请求: {result.get('message') or result.get('error') or result.get('success')}")
         except Exception as exc:
             log(f"  ❌ 启动请求异常: {type(exc).__name__}")
-    for attempt in range(3):
+    for attempt in range(12):
         time.sleep(15)
         try:
             state = real_state(ident)
