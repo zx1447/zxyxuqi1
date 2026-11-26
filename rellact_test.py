@@ -80,12 +80,17 @@ def main():
                     pass
 
         page.on('response', capture)
+        stage = '打开登录页'
         try:
-            page.goto(BASE + '/login', wait_until='domcontentloaded', timeout=45000)
-            page.locator('#identifier').fill(email, timeout=30000)
+            resp = page.goto(BASE + '/login', wait_until='domcontentloaded', timeout=45000)
+            log('登录页 HTTP', resp.status if resp else '未知', '标题:', page.title()[:80])
+            stage = '寻找账号输入框'
+            page.locator('#identifier').fill(email, timeout=20000)
+            stage = '填写密码与安全验证'
             page.locator('#password').fill(password)
             if not verify_widget(page):
                 return 2
+            stage = '提交登录'
             button = page.get_by_role('button', name='Log in', exact=False)
             for _ in range(20):
                 if button.is_enabled():
@@ -103,6 +108,7 @@ def main():
                     log('❌ 未确认登录成功，请检查账号或登录验证')
                 return 2
             log('✅ 登录成功')
+            stage = '打开 AFK 页面'
             page.goto(BASE+'/billing/rewards/afk', wait_until='domcontentloaded', timeout=45000)
             page.wait_for_timeout(5000)
             if '/login' in urlparse(page.url).path:
@@ -132,7 +138,12 @@ def main():
             log('✅ 已核实服务端累计增加')
             return 0
         except Exception as exc:
-            log('❌ 测试异常:',type(exc).__name__)
+            log('❌ 测试异常:',stage,type(exc).__name__)
+            try:
+                text = page.locator('body').inner_text().lower()
+                log('页面提示:', 'Cloudflare 安全检查' if 'cloudflare' in text else '暂无可识别提示')
+            except Exception:
+                pass
             return 2
         finally:
             ctx.close()
