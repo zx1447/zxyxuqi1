@@ -8,17 +8,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - name: Read all server details
+      - name: Cross-check independent renewal and server-list endpoints
         env:
           COALBYTE_EMAIL: ${{ secrets.COALBYTE_EMAIL }}
         run: |
           python - <<'PY'
-          import os, urllib.request, urllib.parse, json
-          q=urllib.parse.urlencode({'email':os.environ['COALBYTE_EMAIL']})
-          req=urllib.request.Request('https://coalbyte.com/api/pelican/servers?'+q, headers={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Edg/157.0.0.0','Accept':'application/json'})
-          with urllib.request.urlopen(req,timeout=25) as r: d=json.load(r)
-          print('userFound',d.get('userFound'),'count',len(d.get('servers') or []))
-          for s in d.get('servers') or []:
-              safe={k:v for k,v in s.items() if k not in ('email','owner','user','userEmail','user_email')}
-              print('SERVER',json.dumps(safe,ensure_ascii=False))
+          import os, urllib.request, urllib.parse, json, time
+          base='https://coalbyte.com/api/pelican/'
+          headers={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Edg/157.0.0.0','Accept':'application/json','Cache-Control':'no-cache'}
+          def get(path,params):
+              params['_']=str(time.time_ns())
+              req=urllib.request.Request(base+path+'?'+urllib.parse.urlencode(params),headers=headers)
+              with urllib.request.urlopen(req,timeout=25) as r:
+                  print('HEADERS',path, {k:r.headers.get(k) for k in ['age','cache-control','x-vercel-cache','cf-cache-status']})
+                  return json.load(r)
+          for attempt in range(2):
+              data=get('servers',{'email':os.environ['COALBYTE_EMAIL']})
+              for row in data.get('servers') or []:
+                  ident=row['identifier']; d=get('renew',{'id':ident})
+                  print('COMPARE',ident,'panel',row.get('status'),'suspended',row.get('suspended'),'LIST',json.dumps(row.get('renewal')),'DIRECT',json.dumps(d))
+              time.sleep(3)
           PY
