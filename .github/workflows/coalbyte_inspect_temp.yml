@@ -15,7 +15,8 @@ jobs:
           python - <<'PY'
           import os, urllib.request, urllib.parse, json
           q=urllib.parse.urlencode({'email':os.environ['COALBYTE_EMAIL']})
-          with urllib.request.urlopen('https://coalbyte.com/api/pelican/servers?'+q,timeout=25) as r: d=json.load(r)
+          req=urllib.request.Request('https://coalbyte.com/api/pelican/servers?'+q, headers={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Edg/157.0.0.0','Accept':'application/json'})
+          with urllib.request.urlopen(req,timeout=25) as r: d=json.load(r)
           print('userFound',d.get('userFound'),'count',len(d.get('servers') or []))
           for s in d.get('servers') or []:
               safe={k:v for k,v in s.items() if k not in ('email','owner','user','userEmail','user_email')}
