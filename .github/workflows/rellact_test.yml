@@ -1,0 +1,25 @@
+name: Rellact One-time Test
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rellact
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install browser
+        run: |
+          pip install playwright==1.56.0
+          python -m playwright install --with-deps chromium
+      - name: 单次登录及 AFK 核验
+        env:
+          RELLACT_EMAIL: ${{ secrets.RELLACT_EMAIL }}
+          RELLACT_PASSWORD: ${{ secrets.RELLACT_PASSWORD }}
+        run: python rellact_test.py
