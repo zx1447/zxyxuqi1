@@ -1,0 +1,26 @@
+name: Rellact HTTP Test
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: rellact-http-test
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rellact
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'requests==2.32.5'
+      - name: 单次 HTTP 登录与 AFK 到账测试
+        env:
+          RELLACT_EMAIL: ${{ secrets.RELLACT_EMAIL }}
+          RELLACT_PASSWORD: ${{ secrets.RELLACT_PASSWORD }}
+          RELLACT_SESSION_TOKEN: ${{ secrets.RELLACT_SESSION_TOKEN }}
+        run: python rellact_afk.py
