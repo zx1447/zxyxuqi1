@@ -1,0 +1,23 @@
+name: CoalByte Status Inspection Temporary
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Read all server details
+        env:
+          COALBYTE_EMAIL: ${{ secrets.COALBYTE_EMAIL }}
+        run: |
+          python - <<'PY'
+          import os, urllib.request, urllib.parse, json
+          q=urllib.parse.urlencode({'email':os.environ['COALBYTE_EMAIL']})
+          with urllib.request.urlopen('https://coalbyte.com/api/pelican/servers?'+q,timeout=25) as r: d=json.load(r)
+          print('userFound',d.get('userFound'),'count',len(d.get('servers') or []))
+          for s in d.get('servers') or []:
+              safe={k:v for k,v in s.items() if k not in ('email','owner','user','userEmail','user_email')}
+              print('SERVER',json.dumps(safe,ensure_ascii=False))
+          PY
