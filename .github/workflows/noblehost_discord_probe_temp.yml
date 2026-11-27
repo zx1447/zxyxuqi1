@@ -1,0 +1,63 @@
+name: NobleHost temporary Discord login investigation
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - name: Install browser dependencies
+        run: |
+          python -m pip install playwright==1.55.0 requests
+          if ! command -v google-chrome >/dev/null && ! command -v google-chrome-stable >/dev/null; then python -m playwright install --with-deps chromium; fi
+      - name: Read-only Discord login check
+        env:
+          NOBLEHOST_DISCORD_TOKEN: ${{ secrets.NOBLEHOST_DISCORD_TOKEN_TEMP }}
+        run: |
+          xvfb-run -a python - <<'PYCODE'
+          import os,sys,shutil,urllib.parse,requests,re
+          from playwright.sync_api import sync_playwright
+          token=os.environ['NOBLEHOST_DISCORD_TOKEN'].strip()
+          with sync_playwright() as p:
+              opts={'headless':False,'args':['--no-sandbox']};chrome=shutil.which('google-chrome') or shutil.which('google-chrome-stable')
+              if chrome:opts['executable_path']=chrome
+              b=p.chromium.launch(**opts);ctx=b.new_context(viewport={'width':1366,'height':900},locale='en-US');pg=ctx.new_page();oauth=[]
+              def capture(req):
+                  u=urllib.parse.urlsplit(req.url)
+                  if u.hostname in ('discord.com','www.discord.com') and '/oauth2/authorize' in u.path:oauth.append(req.url)
+              pg.on('request',capture)
+              try:
+                  r=pg.goto('https://game.noblehost.cc/login',timeout=45000,wait_until='domcontentloaded');print('NOBLE LOGIN HTTP',r.status if r else None,flush=True)
+                  if not pg.locator('#discordLoginBtn').count():print('LOGIN PAGE BLOCKED');sys.exit(2)
+                  verified=False
+                  for x in range(5):
+                      pg.wait_for_timeout(6000)
+                      try:verified=bool(pg.evaluate("() => {try {return window.turnstile && !!turnstile.getResponse('#turnstile-login')} catch(e){return false}}"))
+                      except Exception:verified=False
+                      if verified:break
+                      bb=pg.locator('#turnstile-login').bounding_box()
+                      if bb and x<3:pg.mouse.click(bb['x']+22,bb['y']+bb['height']/2);print('CLICKED VISIBLE CHECKBOX',x+1,flush=True)
+                  print('HUMAN VERIFICATION PASSED',verified,flush=True)
+                  if not verified:sys.exit(2)
+                  pg.locator('#discordLoginBtn').click(timeout=10000);pg.wait_for_timeout(10000);u=urllib.parse.urlsplit(pg.url);print('NAVIGATION HOST',u.hostname,'PATH',u.path,flush=True)
+                  if not oauth:print('DISCORD AUTHORIZE URL NOT OBSERVED');sys.exit(2)
+                  target=urllib.parse.urlsplit(oauth[0]);scopes=urllib.parse.parse_qs(target.query).get('scope',[''])[0].split();print('OAUTH SCOPES',scopes,flush=True)
+                  if any(x not in ('identify','email') for x in scopes):print('EXTRA SCOPES REQUIRE REVIEW');sys.exit(2)
+                  endpoint='https://discord.com/api/v9/oauth2/authorize?'+target.query
+                  r=requests.post(endpoint,json={'permissions':'0','authorize':True,'integration_type':0},headers={'Authorization':token,'Origin':'https://discord.com','User-Agent':'Mozilla/5.0','Accept':'application/json'},timeout=20,allow_redirects=False);print('DISCORD AUTHORIZE HTTP',r.status_code,flush=True)
+                  if r.status_code!=200:sys.exit(2)
+                  loc=r.json().get('location','');d=urllib.parse.urlsplit(loc)
+                  if d.scheme!='https' or d.hostname!='game.noblehost.cc':print('UNEXPECTED CALLBACK HOST');sys.exit(2)
+                  r=pg.goto(loc,wait_until='domcontentloaded',timeout=45000);pg.wait_for_timeout(6000);u=urllib.parse.urlsplit(pg.url);print('CALLBACK HTTP',r.status if r else None,'FINAL PATH',u.path,flush=True)
+                  if u.hostname!='game.noblehost.cc' or u.path.startswith('/login'):print('LOGIN NOT VERIFIED');sys.exit(2)
+                  print('DISCORD LOGIN CONFIRMED',flush=True)
+                  text=pg.locator('body').inner_text();text=re.sub(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}','[email redacted]',text)
+                  for line in text.splitlines():
+                      if any(t in line.lower() for t in ['server','renew','expir','suspend']):print('PAGE',line.strip()[:140],flush=True)
+                  links=pg.locator('a[href]').evaluate_all("els => els.map(e => ({text:(e.innerText||'').trim().slice(0,80),href:e.getAttribute('href')}))")
+                  for item in links:
+                      if item['href'] and any(x in (item['text']+' '+item['href']).lower() for x in ['server','renew']):print('SERVER LINK',item,flush=True)
+              except Exception as e:print('ERROR',type(e).__name__,str(e)[:180],flush=True);sys.exit(2)
+              finally:b.close()
+          PYCODE
