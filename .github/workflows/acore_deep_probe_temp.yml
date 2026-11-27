@@ -50,7 +50,7 @@ jobs:
           try:
               status,data=a.req('/api/client/servers/'+ident+'/websocket',retries=1)
               print('websocket credential endpoint',status,'keys',list(data) if isinstance(data,dict) else '?',flush=True)
-              q=data.get('data',data);sock=q.get('socket');tok=q.get('token')
+              q=data.get('data',data);sock=q.get('socket') or q.get('url');tok=q.get('token')
               if status==200 and sock and tok:
                   ws=websocket.create_connection(sock,timeout=12,origin=a.BASE,http_no_proxy=['*'])
                   ws.send(json.dumps({'event':'auth','args':[tok]}));deadline=time.monotonic()+20
