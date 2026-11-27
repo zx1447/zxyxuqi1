@@ -2,8 +2,7 @@
 """AcoreHost 独立续期检查：站点窗口、到期复查与启动状态核验。
 
 每台只计一次；不能续也检查并尝试启动。starting 不等于 running。
-接口未暴露计划到期时，沿用站点曾返回的最后 8 小时限制，
-续期返回成功后若不能核对到期日期则明确报错，不作成功结论。
+到期时间未知时不续期；续期后必须核对到期时间。
 """
 import json
 import os
@@ -140,21 +139,32 @@ def wait_running(uuid, seconds=POWER_WAIT):
 def ensure_running(uuid, listed_suspended):
     state, uptime, mem = get_state(uuid)
     status_summary(state, uptime, mem)
-    if state == 'running' and not listed_suspended:
+    if state == 'running':
+        if listed_suspended:
+            log('  ❌ 资源状态 running 但面板仍显示挂起，需要人工核实')
+            return False
         log('  ✅ 已确认 running')
         return True
-    if state == 'starting':
-        log('  ⏳ starting 不是 running，先短暂复查')
-        if wait_running(uuid, 30): return True
-    # 即使续期失败或未到窗口，也尝试启动；不发送 restart/stop。
-    if listed_suspended:
-        try:
-            code, body = req(f'{EXT}/storage/start', method='POST', body={'server':uuid}, retries=1)
-            log(f'  storage/start HTTP {code}')
-            if code in (200,204) or 'storage transfer' in errmsg(body).lower():
-                if wait_running(uuid): return True
-        except Exception as e:
-            log(f'  ⚠️ storage/start 异常: {type(e).__name__}')
+    if state in ('starting', 'stopping', 'restarting', 'installing', 'restoring'):
+        log(f'  ⏳ {state} 为过渡状态，等待复查，不重复发送启动')
+        if wait_running(uuid): return True
+        log('  ❌ 过渡状态未变为 running')
+        return False
+    if state == '?':
+        log('  ❌ 状态未知，不盲目发送启动命令')
+        return False
+    # 面板已实抓的启动接口；不能续期也尝试启动。
+    try:
+        code, body = req(f'{EXT}/storage/start', method='POST', body={'server':uuid}, retries=1)
+        log(f'  storage/start HTTP {code}')
+        if code in (200, 204) or 'storage transfer' in errmsg(body).lower():
+            if wait_running(uuid): return True
+            log('  ❌ 启动或存储传输后未确认 running')
+            return False
+    except Exception as e:
+        # 未知是否送达，避免重复触发。
+        log(f'  ❌ storage/start 请求结果未知: {type(e).__name__}')
+        return wait_running(uuid)
     try:
         code, _ = req(f'/api/client/servers/{uuid}/power', method='POST', body={'signal':'start'}, retries=1)
         log(f'  power/start HTTP {code}，以状态复查为准')
@@ -168,13 +178,12 @@ def ensure_running(uuid, listed_suspended):
 
 
 def renew_server(uuid, old_expiry):
-    # 此站历史实测 422 提示仅最后 8 小时开放，保留原站点窗口判断。
-    # 如果能获取可信到期时间，再明确执行用户最后 48 小时策略。
-    if old_expiry is not None and old_expiry - time.time() > 48*3600:
+    if old_expiry is None:
+        log('  ❌ 计划到期时间未知：无法核实是否进入最后 48 小时，跳过续期')
+        return False, 'expiry_unknown'
+    if old_expiry - time.time() > 48*3600:
         log('  ⏳ 剩余超过 48 小时，本轮不续期')
         return True, 'not_due'
-    if old_expiry is None:
-        log('  ⚠️ 计划到期时间不可读；沿用站点服务端续期窗口，但无法独立验证 48 小时门槛')
     try:
         code, data = req(f'{EXT}/renew', method='POST', body={'server':uuid}, retries=1)
     except Exception as e:
@@ -209,12 +218,9 @@ def inspect_server(server):
     log(f'-- [{uuid[:8]}] {name} | suspended={suspended} --')
     old_expiry = expiry_from(get_details(uuid)) or expiry_from(server)
     renew_ok, renew_state = renew_server(uuid, old_expiry)
-    if suspended and renew_state not in ('renewed','unverified'):
-        try:
-            code, data = req(f'{EXT}/restore', method='POST', body={'server':uuid}, retries=1)
-            log(f'  restore HTTP {code}（将继续核实启动状态）')
-        except Exception as e:
-            log(f'  ⚠️ restore 异常: {type(e).__name__}')
+    # restore 可改变计划到期；未能确认其具体语义，不用它绕过续期门槛。
+    if suspended:
+        log('  ⚠️ 服务器处于挂起状态；不盲目调用可能修改计划的 restore')
     latest = get_details(uuid)
     if isinstance(latest.get('is_suspended'), bool):
         suspended = latest['is_suspended']
