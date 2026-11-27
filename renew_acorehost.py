@@ -1,29 +1,10 @@
 #!/usr/bin/env python3
-# AcoreHosting 免费服计划自动续期（dev.sqidgeon.serverplans 扩展）
-#
-# 机制（2026-11-13 实测）：
-#   清单 GET  {base}/api/client/servers
-#        → {servers:{data:[{uuid, name, is_suspended, status, ...}]}}
-#   续期 POST {base}/api/client/extensions/dev.sqidgeon.serverplans/renew   {"server":"<uuid>"}
-#        → 仅剩 <8 小时时可打（否则 422 "Renewal is available when less than 8 hours remain"）
-#   恢复 POST {base}/api/client/extensions/dev.sqidgeon.serverplans/restore {"server":"<uuid>"}
-#        → 从"计划挂起"中拉起（否则 "Server is not in plan suspension"）
-#   鉴权 Authorization: Bearer <ACORE_API_KEY>（c7sp_ 客户端 API key）
-#
-#   电源 POST {base}/api/client/servers/{uuid}/power  {"signal":"start"|"stop"|"restart"|"kill"}
-#        → 204 无 body。Pterodactyl 标准接口。
-#          服务器 status 可能是 running / starting / stopping / offline / null
-#
-# 策略：每轮先 renew（窗口内直接续命）；不成功再 restore（错过窗口被挂起则拉回）；
-#       最后检查 status，**不是 running 就发 start 拉起来**。
-#       两个报错都是良性"还没到时候"，只报告。窗口 8 小时很宽，30 分钟粒度足够。
-#
-# 环境变量：
-#   ACORE_API_KEY   必填
-#   ACORE_BASE      默认 https://dash.acorehosting.com
-#
-# 退出码：0 正常/续期/恢复成功；2 有失败；3 缺 key/鉴权死
+"""AcoreHost 独立续期检查：站点窗口、到期复查与启动状态核验。
 
+每台只计一次；不能续也检查并尝试启动。starting 不等于 running。
+接口未暴露计划到期时，沿用站点曾返回的最后 8 小时限制，
+续期返回成功后若不能核对到期日期则明确报错，不作成功结论。
+"""
 import json
 import os
 import sys
@@ -32,11 +13,7 @@ import urllib.request
 import urllib.error
 
 BASE = os.environ.get("ACORE_BASE", "https://dash.acorehosting.com").rstrip("/")
-# ⚠️ secret 里可能粘进引号/换行，strip() 去不掉引号 → 会报
-#    "invalid authorization header"，必须一并清掉
-# ⚠️ secret 里可能粘进引号/换行，strip() 去不掉引号 → 会报
-#    "invalid authorization header"，必须一并清掉。
-# key 内置（PAT 无法新建 secret，与 craftinghosting 同样处理）
+# 使用 Actions Secret；保留现有 API key 回退以兼容原配置。
 KEY = os.environ.get(
     "ACORE_API_KEY",
     "c7sp_xLaU1QmpQq5IX1apkfOZ2PVW8IXwgHsUgYqLm6LwA9F").strip().strip("'\"").strip()
@@ -92,241 +69,195 @@ def errmsg(d):
     return str(d)
 
 
-ALIVE_STATES = {"running", "starting"}
-SKIP_STATES = {"stopping", "restarting", "installing", "restoring"}
-POWER_WAIT = int(os.environ.get("POWER_WAIT_SECONDS", "120"))
+# 单服只计一次；只有 confirmed running 才算运行成功。
+POWER_WAIT = 90
 
 
 def get_state(uuid):
-    """真实运行状态。
-
-    ⚠️ 清单里的 status 字段在这个面板上恒为 null（实测多次），
-       不能当判据。真实状态在 /resources 的 state 字段：
-       running / starting / stopping / offline
-    返回 (state, uptime_ms, mem_mb)；拿不到返回 ("?", 0, 0)。
-    """
     try:
-        code, d = req(f"/api/client/servers/{uuid}/resources")
-    except Exception:  # noqa: BLE001
-        return "?", 0, 0
-    if code != 200 or not isinstance(d, dict):
-        return "?", 0, 0
-    r = d.get("resources") or {}
-    return ((r.get("state") or "?").lower(),
-            r.get("uptime") or 0,
-            round((r.get("memory_bytes") or 0) / 1024 / 1024))
+        code, d = req(f'/api/client/servers/{uuid}/resources', retries=1)
+        r = d.get('resources') or {} if isinstance(d, dict) else {}
+        if code != 200 or not isinstance(r, dict):
+            return '?', 0, 0
+        return str(r.get('state') or '?').lower(), r.get('uptime') or 0, round((r.get('memory_bytes') or 0) / 1048576)
+    except Exception:
+        return '?', 0, 0
 
 
-def power(uuid, signal="start"):
-    """POST /api/client/servers/{uuid}/power。成功返回 (True, "HTTP 204")。"""
+def get_details(uuid):
     try:
-        code, d = req(f"/api/client/servers/{uuid}/power", method="POST",
-                      body={"signal": signal})
-    except Exception as e:  # noqa: BLE001
-        return False, f"{type(e).__name__}: {e}"
-    if code in (200, 204):
-        return True, f"HTTP {code}"
-    return False, f"HTTP {code} {errmsg(d)}"
+        code, data = req(f'/api/client/servers/{uuid}', retries=1)
+        if code == 200 and isinstance(data, dict):
+            return data.get('server') or {}
+    except Exception:
+        pass
+    return {}
 
 
-def storage_start(uuid):
-    """面板「点启动」的真实接口（2026-11-23 DevTools 实抓）：
-       POST {EXT}/storage/start  body {"server": "<uuid>"}
-       ✅ 200 = 已接受；422 "Wait for the storage transfer" = 存储传输中，别重复发
-       不依赖续期窗口：「不能续」不代表「不能点启动」。
-    返回 (code, msg)。"""
+def expiry_from(server):
+    """只接受明确的计划到期字段；不猜 created/updated/节点运行时间。"""
+    from datetime import datetime, timezone
+    if not isinstance(server, dict):
+        return None
+    candidates = []
+    for key in ('expires_at', 'expiry_at', 'expiration_date', 'expiresAt', 'plan_expires_at', 'plan_expiry'):
+        if server.get(key) is not None:
+            candidates.append(server[key])
+    for key in ('plan', 'server_plan', 'serverplans', 'renewal'):
+        nested = server.get(key)
+        if isinstance(nested, dict):
+            for field in ('expires_at', 'expiry_at', 'expiration_date', 'expiresAt'):
+                if nested.get(field) is not None:
+                    candidates.append(nested[field])
+    for value in candidates:
+        try:
+            if isinstance(value, (int,float)) and not isinstance(value,bool):
+                stamp = float(value)
+                if stamp > 1e11: stamp /= 1000
+                if 946684800 < stamp < 4102444800: return stamp
+            if isinstance(value,str):
+                parsed = datetime.fromisoformat(value.replace('Z','+00:00'))
+                if parsed.tzinfo is not None: return parsed.astimezone(timezone.utc).timestamp()
+        except (ValueError, OverflowError):
+            pass
+    return None
+
+
+def status_summary(state, uptime, memory):
+    log(f'  📊 实际资源状态: {state} | uptime={uptime/3600000:.1f}h | 内存={memory}MB')
+
+
+def wait_running(uuid, seconds=POWER_WAIT):
+    final = '?'
+    for i in range(max(1, seconds // 10)):
+        time.sleep(10)
+        final, uptime, mem = get_state(uuid)
+        log(f'  运行复查 {(i+1)*10}s: {final}')
+        if final == 'running': return True
+    return False
+
+
+def ensure_running(uuid, listed_suspended):
+    state, uptime, mem = get_state(uuid)
+    status_summary(state, uptime, mem)
+    if state == 'running' and not listed_suspended:
+        log('  ✅ 已确认 running')
+        return True
+    if state == 'starting':
+        log('  ⏳ starting 不是 running，先短暂复查')
+        if wait_running(uuid, 30): return True
+    # 即使续期失败或未到窗口，也尝试启动；不发送 restart/stop。
+    if listed_suspended:
+        try:
+            code, body = req(f'{EXT}/storage/start', method='POST', body={'server':uuid}, retries=1)
+            log(f'  storage/start HTTP {code}')
+            if code in (200,204) or 'storage transfer' in errmsg(body).lower():
+                if wait_running(uuid): return True
+        except Exception as e:
+            log(f'  ⚠️ storage/start 异常: {type(e).__name__}')
     try:
-        code, d = req(f"{EXT}/storage/start", method="POST", body={"server": uuid})
-    except Exception as e:  # noqa: BLE001
-        return 0, f"{type(e).__name__}: {e}"
-    return code, errmsg(d)
+        code, _ = req(f'/api/client/servers/{uuid}/power', method='POST', body={'signal':'start'}, retries=1)
+        log(f'  power/start HTTP {code}，以状态复查为准')
+    except Exception as e:
+        log(f'  ⚠️ power/start 异常: {type(e).__name__}')
+    if wait_running(uuid):
+        log('  ✅ 已确认 running')
+        return True
+    log('  ❌ 不能确认服务器 running')
+    return False
 
 
-def wait_alive(uuid, tag):
-    """轮询 /resources 直到 running/starting，返回 (final_state, waited)"""
-    waited, final = 0, "?"
-    while waited < POWER_WAIT:
-        time.sleep(8)
-        waited += 8
-        final, fu, fm = get_state(uuid)
-        log(f"     {tag} {waited}s: state={final} 内存={fm}MB")
-        if final in ALIVE_STATES:
-            break
-    return final, waited
+def renew_server(uuid, old_expiry):
+    # 此站历史实测 422 提示仅最后 8 小时开放，保留原站点窗口判断。
+    # 如果能获取可信到期时间，再明确执行用户最后 48 小时策略。
+    if old_expiry is not None and old_expiry - time.time() > 48*3600:
+        log('  ⏳ 剩余超过 48 小时，本轮不续期')
+        return True, 'not_due'
+    if old_expiry is None:
+        log('  ⚠️ 计划到期时间不可读；沿用站点服务端续期窗口，但无法独立验证 48 小时门槛')
+    try:
+        code, data = req(f'{EXT}/renew', method='POST', body={'server':uuid}, retries=1)
+    except Exception as e:
+        log(f'  ❌ 续期请求异常: {type(e).__name__}')
+        return False, 'error'
+    msg = errmsg(data)
+    if code == 422 and 'renewal is available when less than 8 hours remain' in msg.lower():
+        log('  ⏳ 站点返回未到续期窗口')
+        return True, 'not_due'
+    if code != 200 or not isinstance(data,dict) or data.get('renewed') is not True:
+        log(f'  ❌ 续期未确认: HTTP {code}, {msg[:150]}')
+        return False, 'error'
+    log('  ⏳ 续期接口报告 renewed=true，正在复核计划到期时间')
+    time.sleep(3)
+    new_expiry = expiry_from(get_details(uuid))
+    if old_expiry is None or new_expiry is None:
+        log('  ❌ 到期时间不可读，无法核实续期是否生效')
+        return False, 'unverified'
+    if new_expiry <= old_expiry:
+        log('  ❌ 到期时间未延后，续期未核实')
+        return False, 'unverified'
+    log(f'  ✅ 已核实到期时间后移: {old_expiry:.0f} → {new_expiry:.0f}')
+    return True, 'renewed'
+
+
+def inspect_server(server):
+    uuid = server.get('uuid')
+    if not isinstance(uuid,str) or not uuid:
+        log('❌ 服务器 ID 缺失')
+        return False, ('—',server.get('name','?'),'❌','缺 ID')
+    name=server.get('name','?');suspended=server.get('is_suspended') is True
+    log(f'-- [{uuid[:8]}] {name} | suspended={suspended} --')
+    old_expiry = expiry_from(get_details(uuid)) or expiry_from(server)
+    renew_ok, renew_state = renew_server(uuid, old_expiry)
+    if suspended and renew_state not in ('renewed','unverified'):
+        try:
+            code, data = req(f'{EXT}/restore', method='POST', body={'server':uuid}, retries=1)
+            log(f'  restore HTTP {code}（将继续核实启动状态）')
+        except Exception as e:
+            log(f'  ⚠️ restore 异常: {type(e).__name__}')
+    latest = get_details(uuid)
+    if isinstance(latest.get('is_suspended'), bool):
+        suspended = latest['is_suspended']
+    try:
+        running = ensure_running(uuid, suspended)
+    except Exception as e:
+        log(f'  ❌ 运行状态检查异常: {type(e).__name__}')
+        running = False
+    ok = renew_ok and running
+    return ok, (uuid[:8], name, '✅' if ok else '❌', f'续期={renew_state}, running={running}')
 
 
 def pass_once():
-    """一轮巡检：renew 优先，restore 兜底。返回 (ok_count, total, rows)"""
-    st, lst = req("/api/client/servers")
-    if st != 200 or not isinstance(lst, dict):
-        log(f"❌ 取服务器清单失败 HTTP {st}: {errmsg(lst)}")
-        # 401/403 = key 无效或缺权限，必须让上层按失败退出，
-        # 不能 return 0,0 让 main 误判成 success（旧版就这样静默吞了）
-        raise AuthError(f"HTTP {st}: {errmsg(lst)}")
-    servers = (lst.get("servers") or {}).get("data") or []
-    if not servers:
-        log("⚠️ 名下没有服务器")
-        return 0, 0, []
-
-    ok, rows = 0, []
-    for s in servers:
-        uuid, name = s.get("uuid"), s.get("name", "?")
-        susp, status = s.get("is_suspended"), s.get("status")
-        log(f"-- [{uuid[:8]}] {name} | suspended={susp} | status={status} --")
-
-        # 1) renew：窗口内直接续命
-        #    ⚠️ 续期成功后**必须**接着启动！续期只是延长计划期限，
-        #       服务器不会自己跑起来（用户 2026-11-23 明确要求：续期后再点启动）。
-        renewed = False
-        code, d = req(f"{EXT}/renew", method="POST", body={"server": uuid})
-        if code == 200:
-            log(f"  🚀 renew OK: {json.dumps(d, ensure_ascii=False)[:160]}")
-            rows.append((uuid[:8], name, "🚀 已续期", errmsg(d)[:60]))
-            ok += 1
-            renewed = True
-        renew_msg = errmsg(d)
-
-        # 2) restore：错过窗口被计划挂起 → 拉回
-        code2, d2 = (0, {})
-        restored = False
-        if not renewed:
-            code2, d2 = req(f"{EXT}/restore", method="POST", body={"server": uuid})
-            restored = code2 == 200
-        if restored:
-            log(f"  🆘 restore OK: {json.dumps(d2, ensure_ascii=False)[:160]}")
-            rows.append((uuid[:8], name, "🆘 已恢复", errmsg(d2)[:60]))
-            ok += 1
-            # ⚠️ 不要 continue：restore 之后服务器可能是 restoring/offline，
-            #    必须继续走下面的「开机检查」，否则会一直躺着不起来。
-            susp = False          # restore 后已脱离 plan suspension
-        restore_msg = errmsg(d2)
-
-        if not renewed:
-            log(f"  · renew : HTTP {code} {renew_msg[:120]}")
-            if not restored:
-                log(f"  · restore: HTTP {code2} {restore_msg[:120]}")
-
-        # 3) 真实状态（清单 status 恒 null，只能看 /resources）
-        state, uptime, mem = get_state(uuid)
-        up_h = round(uptime / 3600000, 1)
-        log(f"  📊 真实状态: {state} | 已运行 {up_h}h | 内存 {mem}MB")
-
-        if state in ALIVE_STATES:
-            log("  ✅ 运行中，无需动作")
-            rows.append((uuid[:8], name, "✅ 运行中", f"{state} {up_h}h"))
-            ok += 1
-        elif state in SKIP_STATES:
-            log(f"  ⏭ 过渡状态（{state}），下轮复查")
-            rows.append((uuid[:8], name, "⏭ 过渡中", state))
-            ok += 1
-        else:
-            # 4) 没在跑 → 点启动。续期不能替代启动（「不能续不代表不能点启动」）
-            log(f"  🔌 未运行（{state}）→ 面板启动接口 storage/start")
-            scode, smsg = storage_start(uuid)
-            if scode in (200, 204):
-                log(f"  🟢 storage/start 已接受，轮询确认…")
-                final, waited = wait_alive(uuid, "启动")
-                if final in ALIVE_STATES:
-                    rows.append((uuid[:8], name, "🔌 已开机", f"原状态 {state}"))
-                    ok += 1
-                else:
-                    rows.append((uuid[:8], name, "❌ 开机后仍停机",
-                                 f"{waited}s 后 {final}"))
-            elif "storage transfer" in smsg.lower():
-                log(f"  ⏳ 存储传输中（面板已在启动）→ 等待，不重复发")
-                final, waited = wait_alive(uuid, "传输")
-                if final in ALIVE_STATES:
-                    rows.append((uuid[:8], name, "🔌 已开机", "传输完成后启动"))
-                    ok += 1
-                else:
-                    rows.append((uuid[:8], name, "⏳ 传输中",
-                                 f"{waited}s 后 {final}，下轮复查"))
-                    ok += 1
-            else:
-                log(f"  ❌ storage/start: HTTP {scode} {smsg[:120]}")
-                # 兜底：标准 power 接口
-                boot_ok, boot_msg = power(uuid, "start")
-                if boot_ok:
-                    final, waited = wait_alive(uuid, "power")
-                    if final in ALIVE_STATES:
-                        rows.append((uuid[:8], name, "🔌 已开机", "power 兜底"))
-                        ok += 1
-                    else:
-                        rows.append((uuid[:8], name, "❌ 开机后仍停机",
-                                     f"{waited}s 后 {final}"))
-                elif "suspended" in str(boot_msg).lower():
-                    log(f"  🚫 面板封禁（suspended），API 无法解除")
-                    rows.append((uuid[:8], name, "🚫 面板封禁",
-                                 "需人工处理：storage/start 与 power 均被拒"))
-                else:
-                    log(f"  ❌ 开机失败: {boot_msg}")
-                    rows.append((uuid[:8], name, "❌ 开机失败", boot_msg[:50]))
-        time.sleep(1)
-    return ok, len(servers), rows
-
-
-def loop(minutes):
-    """长驻守护：30 分钟一轮（防 GitHub schedule 调度饿死；接力由 workflow 负责）"""
-    deadline = time.time() + minutes * 60
-    cycles = 0
-    rows_last = []
-    while True:
-        cycles += 1
-        left = (deadline - time.time()) / 60
-        log(f"—— [loop] 第 {cycles} 轮（预算剩 {left:.0f} 分钟）——")
+    try:
+        code, data = req('/api/client/servers', retries=1)
+    except Exception as e:
+        log(f'❌ 无法读取服务器清单: {type(e).__name__}')
+        return 0,0,[]
+    if code != 200 or not isinstance(data,dict):
+        log(f'❌ 服务器清单 HTTP {code}')
+        return 0,0,[]
+    servers=(data.get('servers') or {}).get('data') or []
+    if not isinstance(servers,list) or not servers:
+        log('❌ 未发现服务器')
+        return 0,0,[]
+    results=[]
+    for server in servers:
         try:
-            ok, total, rows = pass_once()
-            rows_last = rows
-            if total and ok < total:
-                log("⚠️ 本轮有失败项（下轮复查）")
-        except Exception as e:  # noqa: BLE001
-            log(f"⚠️ [loop] 本轮异常: {type(e).__name__}: {e}")
-        rest = deadline - time.time()
-        if rest <= 0:
-            break
-        t = min(1800, rest)
-        log(f"— [loop] 休眠 {t / 60:.0f} 分钟后复查 —")
-        time.sleep(t)
-    summary(rows_last)
-    log("— [loop] 本轮预算用尽，交棒下一次运行 —")
-    return 0
-
-
-def summary(rows):
-    path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if path and rows:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write("## AcoreHosting 续期巡检\n\n")
-            f.write("| 服务器 | 名称 | 动作 | 说明 |\n|---|---|---|---|\n")
-            for r in rows:
-                f.write(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} |\n")
+            results.append(inspect_server(server))
+        except Exception as e:
+            log(f'❌ 单服检查异常: {type(e).__name__}')
+            results.append((False,('—','—','❌','单服检查异常')))
+    return sum(bool(ok) for ok,_ in results),len(servers),[row for _,row in results]
 
 
 def main():
     if not KEY:
-        log("❌ 缺 ACORE_API_KEY")
+        log('❌ 缺少 ACORE_API_KEY')
         return 3
-    log(f"🎯 AcoreHosting 计划续期 · {BASE}")
-    try:
-        ok, total, rows = pass_once()
-    except AuthError as e:
-        log(f"❌ 鉴权失败：{e}")
-        log("   → 检查 ACORE_API_KEY 是否有效、是否勾了 control.start / "
-            "serverplans.renew 权限")
-        summary([("—", "—", "❌ 鉴权失败", str(e)[:80])])
-        return 3
-    summary(rows)
-    if total == 0:
-        log("⚠️ 名下没有服务器")
-        return 3
-    return 0 if ok == total else 2
+    ok,total,rows=pass_once()
+    log(f'单服综合通过 {ok}/{total}')
+    return 0 if total>0 and ok==total else 2
 
 
-if __name__ == "__main__":
-    if "--loop" in sys.argv:
-        try:
-            mins = float(sys.argv[sys.argv.index("--loop") + 1])
-        except (IndexError, ValueError):
-            mins = 330.0
-        sys.exit(loop(mins))
+if __name__=='__main__':
     sys.exit(main())
