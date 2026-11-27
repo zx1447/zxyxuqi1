@@ -1,0 +1,79 @@
+name: BlackFlame temporary read-only inspection
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - name: 接入 Cloudflare WARP
+        run: |
+          set -x
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --dearmor --yes -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-warp.list
+          sudo apt-get update -qq
+          sudo apt-get install -y cloudflare-warp
+          sudo systemctl restart warp-svc || true
+          sleep 3
+          sudo warp-cli --accept-tos --help 2>&1 | head -40 || true
+          sudo warp-cli --accept-tos registration new || true
+          sudo warp-cli --accept-tos mode warp 2>/dev/null || sudo warp-cli --accept-tos set-mode warp 2>/dev/null || true
+          sudo warp-cli --accept-tos connect
+          # 真通判定：cdn-cgi/trace 必须 warp=on（ip 字面量连通，排除 DNS 干扰）
+          ok=0
+          for i in $(seq 1 20); do
+            trace=$(curl -s --max-time 8 https://1.1.1.1/cdn-cgi/trace || true)
+            echo "--- trace try $i ---"; echo "$trace"
+            if echo "$trace" | grep -q 'warp=on'; then ok=1; break; fi
+            sudo warp-cli --accept-tos status || true
+            sudo warp-cli --accept-tos connect || true
+            sleep 3
+          done
+          test "$ok" = 1
+          echo "--- 站点连通性（首连偶发失败，重试判定）---"
+          ok2=0
+          for i in $(seq 1 5); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 https://dashbord.blackflamestudio.us.ci/api/auth/csrf || echo 000)
+            echo "try$i: HTTP $code"
+            if [ "$code" = "200" ]; then ok2=1; break; fi
+            sleep 3
+          done
+          test "$ok2" = 1
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read dashboard without starting advertisements
+        env:
+          BFLAME_DISCORD_TOKEN: ${{ secrets.BFLAME_DISCORD_TOKEN }}
+        run: |
+          python3 - <<'PYCODE'
+          import sys,re,json,urllib.parse
+          import checkin_blackflame as b
+          try:
+              session=b.login();print('AUTHENTICATED',bool(session.get('user')),'INITIAL_COINS',session.get('user',{}).get('coins'),flush=True)
+              status,html=b.site('/dashboard');print('DASHBOARD HTTP',status,'HTML LENGTH',len(html),flush=True)
+              paths=sorted(set(re.findall(r'/_next/static/chunks/[^"\'\\ )]+\.js',html)));print('JS CHUNK COUNT',len(paths),flush=True)
+              terms=('startAdWatch','cancelAdWatch','verifyAndRewardAdWatch')
+              for c in paths[:55]:
+                  try:
+                      st,js=b.req(b.BASE+c,headers={'User-Agent':b.UA},timeout=15,retries=1)
+                      for term in terms:
+                          for match in list(re.finditer(term,js))[:3]:
+                              around=js[max(0,match.start()-400):match.end()+400]
+                              hashes=re.findall(r'(?<![0-9a-f])[0-9a-f]{40,48}(?![0-9a-f])',around)
+                              print('ACTION REF',term,'hash lengths',[len(x) for x in hashes],'hash prefixes',[x[:12] for x in hashes],flush=True)
+                  except Exception as exc:print('CHUNK ERROR',type(exc).__name__,flush=True)
+              from html.parser import HTMLParser
+              class Links(HTMLParser):
+                  def handle_starttag(self,tag,attrs):
+                      d=dict(attrs);url=d.get('href','')
+                      if tag=='a' and url and any(x in url.lower() for x in ('server','wallet','earn','dashboard')) and not '?' in url: print('LINK',url[:120],flush=True)
+              Links().feed(html)
+              print('FINAL_COINS',b.coins_now(),flush=True)
+          except Exception as exc:print('READ-ONLY ERROR',type(exc).__name__,str(exc)[:120],flush=True);sys.exit(2)
+          PYCODE
