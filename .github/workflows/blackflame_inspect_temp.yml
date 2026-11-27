@@ -47,46 +47,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: One-time ad reward verification
+      - name: Read-only balance after uncertain request
         env:
           BFLAME_DISCORD_TOKEN: ${{ secrets.BFLAME_DISCORD_TOKEN }}
         run: |
           python3 - <<'PYCODE'
-          import re,sys,time,json
+          import sys
           import checkin_blackflame as b
-
-          def parse_flight(raw):
-              values=[]
-              for line in raw.splitlines():
-                  if ':' not in line:continue
-                  value=line.split(':',1)[1]
-                  try:
-                      obj=json.loads(value)
-                      if isinstance(obj,dict):values.append(obj)
-                  except (ValueError,TypeError):pass
-              return values
-
-          def call(action):
-              headers={'User-Agent':b.UA,'Origin':b.BASE,'Referer':b.BASE+'/dashboard','Next-Action':action,'Content-Type':'text/plain;charset=UTF-8','Accept':'text/x-component'}
-              return b.req(b.BASE+'/dashboard',method='POST',headers=headers,data=b'[]',retries=1)
-
           try:
-              b.login();before=b.coins_now();code,html=b.site('/dashboard');names={}
-              chunks=sorted(set(re.findall(r"/_next/static/chunks/[^\"'\\ )]+\.js",html)))
-              patt=r'createServerReference\)\("([0-9a-f]{40,64})",[\s\S]{0,180}?"(startAdWatch|cancelAdWatch|verifyAndRewardAdWatch)"\)'
-              for path in chunks:
-                  try:
-                      _,js=b.req(b.BASE+path,headers={'User-Agent':b.UA},timeout=15,retries=1)
-                      for action,name in re.findall(patt,js):names[name]=action
-                  except Exception as e:print('CHUNK ERROR',type(e).__name__)
-              print('DISCOVERED',sorted(names),'BEFORE',before,flush=True)
-              if not all(x in names for x in ('startAdWatch','verifyAndRewardAdWatch')):raise RuntimeError('action references missing')
-              status,text=call(names['startAdWatch']);objs=parse_flight(text);print('START HTTP',status,'FLIGHT',json.dumps([{k:o.get(k) for k in ('success','error','requiredSeconds','message') if k in o} for o in objs],ensure_ascii=False),flush=True)
-              errors=[o.get('error') for o in objs if o.get('error') and not str(o.get('error')).startswith('$')]
-              need=next((o.get('requiredSeconds') for o in objs if isinstance(o.get('requiredSeconds'),int)),None)
-              if status!=200 or errors or need is None or not 1<=need<=120:raise RuntimeError('start not confirmed; no verify sent')
-              time.sleep(need+2)
-              status,text=call(names['verifyAndRewardAdWatch']);objs=parse_flight(text);print('VERIFY HTTP',status,'FLIGHT',json.dumps([{k:o.get(k) for k in ('success','error','message','coins','reward','coinsEarned','newBalance','adCoins') if k in o} for o in objs],ensure_ascii=False),flush=True)
-              after=b.coins_now();print('BALANCE BEFORE',before,'AFTER',after,'DELTA',after-before,flush=True)
-          except Exception as e:print('TEST ERROR',type(e).__name__,str(e)[:150],flush=True);sys.exit(2)
+              sess=b.login(); print('READ ONLY COINS',b.coins_now(),flush=True)
+              status,html=b.site('/dashboard');print('DASHBOARD HTTP',status,'bytes',len(html),flush=True)
+          except Exception as e:print('READ ONLY ERROR',type(e).__name__,str(e)[:100],flush=True);sys.exit(2)
           PYCODE
