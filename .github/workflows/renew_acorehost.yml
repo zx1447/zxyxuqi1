@@ -1,18 +1,13 @@
 name: AcoreHost Renew
 
 # AcoreHosting 免费服计划自动续期（dev.sqidgeon.serverplans）
-#  · 单轮巡检（不接力、不自派发）：renew 窗口内续命 → 无论续没续，都用 /resources 看真实状态
+#  · 单轮巡检（不接力、不自派发）：确认最后 48 小时才续期，并复查到期与运行状态
 #  · 没在跑 → POST {EXT}/storage/start {"server":uuid} 点启动（续期不能替代启动）
 #  · cron 每 6 小时一次；单轮 15 分钟上限
 on:
   schedule:
     - cron: '23 */6 * * *'
   workflow_dispatch:
-    inputs:
-      run_minutes:
-        description: '本轮守护时长（分钟，默认 330；快测填 3）'
-        required: false
-        default: '14'
 
 concurrency:
   group: acore-renew-${{ github.ref_name || 'manual' }}
@@ -34,10 +29,9 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: 守护循环（renew 优先，restore 兜底）
+      - name: 逐台检查到期与运行状态
         id: renew
         env:
           ACORE_API_KEY: ${{ secrets.ACORE_API_KEY }}
-          RUN_MINUTES: ${{ github.event.inputs.run_minutes || '14' }}
         run: python3 renew_acorehost.py
 
