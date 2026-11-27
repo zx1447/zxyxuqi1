@@ -1,15 +1,13 @@
-# RKing Industries — 独立分支（待登录）
+# RKing Industries — 服务器 55
 
-目标：https://rkingindustries.com/minecraft/panel?server=55
+独立分支 `rking`，主分支工作流 `.github/workflows/rking_keepalive.yml` 检出本分支。
 
-## 需求
-
-每 8 小时检查指定服务器 55；只有确认停机时尝试启动，并复查实际状态，starting 不算 running。单轮不超过 15 分钟；不自派发，不影响其他服务。
-
-## 当前情况
-
-- 该分支为无父提交的干净独立分支；尚未实现或启用定时任务。
-- 网站登录接口返回 HTTP 401 / Invalid credentials，不能判断哪一项有误。不得反复尝试或猜测密码。
-- 用户名和密码仅放 GitHub Actions Secrets：`RKING_USERNAME`、`RKING_PASSWORD`。
-- 登录成功后，需要只读核查服务器 55 的控制接口和状态字段，再实现状态检查与停机启动；不能把 HTTP 200 或 starting 当作已运行。
-- 等用户确认账号密码并更新 Secret 后再测试，当前无成功登录及有效启动验证。
+- 每 8 小时检查一次：`19 */8 * * *`（UTC），支持手动运行。
+- 每轮一次检查，任务上限 6 分钟，不自派发、不串接任务。
+- 使用 GitHub Secrets `RKING_USERNAME` / `RKING_PASSWORD` 登录，不将账号密码写入代码。
+- 同时读取服务器 55 详情及实时统计；只有两者均 `online` 且统计有运行时长才算成功。
+- 两者均 `offline` 时请求一次面板 Start；无论启动请求是否成功，轮询确认实际状态，不能重复盲发。
+- `starting`、`crashed` 等过渡状态等待复查，不算在线。状态不一致不盲目启动。
+- 即使计划过期也会尝试启动，存储超限时按照面板限制停止操作并报告失败。
+- 服务器目前在线；真实离线开机链尚未实测，不会为了测试而关机。
+- 本地测试：`python -m unittest discover -v`。
