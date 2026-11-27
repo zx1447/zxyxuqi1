@@ -1,0 +1,26 @@
+name: RKing Server Keepalive
+on:
+  schedule:
+    - cron: '19 */8 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: rking-server-55
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rking
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 检查并必要时启动服务器 55
+        env:
+          RKING_USERNAME: ${{ secrets.RKING_USERNAME }}
+          RKING_PASSWORD: ${{ secrets.RKING_PASSWORD }}
+        run: python3 rking_keepalive.py
