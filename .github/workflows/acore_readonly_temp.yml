@@ -1,0 +1,45 @@
+name: AcoreHost Read-only Inspection
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 查询清单和运行状态
+        env:
+          ACORE_API_KEY: ${{ secrets.ACORE_API_KEY }}
+        run: |
+          python - <<'PYCODE'
+          import renew_acorehost as m
+          def scan(value, path='', depth=0):
+              if depth > 5:return
+              if isinstance(value,dict):
+                  for k,v in value.items():
+                      path2=path+'/'+k
+                      if any(x in k.lower() for x in ['expir','renew','suspend','stored','plan','last']) and isinstance(v,(str,int,float,bool,type(None))): print('  ',path2,repr(v),flush=True)
+                      elif isinstance(v,(dict,list)):scan(v,path2,depth+1)
+              elif isinstance(value,list):
+                  for v in value[:5]:scan(v,path,depth+1)
+          st, data=m.req('/api/client/servers',retries=1)
+          print('服务器清单 HTTP',st,flush=True)
+          if st != 200:raise SystemExit(2)
+          servers=(data.get('servers') or {}).get('data') or []
+          print('服务器数量',len(servers),flush=True)
+          if not servers:raise SystemExit(2)
+          for server in servers:
+              ident=server.get('uuid');print('服务器',ident[:8],server.get('name'),'suspended',server.get('is_suspended'),'字段',list(server.keys()),flush=True);scan(server)
+              st,d=m.req('/api/client/servers/'+ident+'/resources',retries=1);r=d.get('resources') or {}; print('resources HTTP',st,'state',r.get('state'),'uptime',r.get('uptime'),'memory_bytes',r.get('memory_bytes'),flush=True)
+              if st!=200:raise SystemExit(2)
+              for path in ['/api/client/servers/'+ident, m.EXT, m.EXT+'/servers/'+ident, m.EXT+'/status?server='+ident]:
+                  try:
+                      st,body=m.req(path,retries=1);print('详情路由',path.replace(ident,ident[:8]),'HTTP',st,'keys',list(body) if isinstance(body,dict) else '非JSON',flush=True)
+                      if st==200:scan(body)
+                  except Exception as e:print('详情异常',type(e).__name__,flush=True)
+          PYCODE
