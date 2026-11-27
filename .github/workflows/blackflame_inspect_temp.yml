@@ -43,19 +43,15 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: blackflame
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Read-only balance after uncertain request
+      - name: One-time BlackFlame verification
         env:
           BFLAME_DISCORD_TOKEN: ${{ secrets.BFLAME_DISCORD_TOKEN }}
+          BFLAME_RUN_MINUTES: '0'
+          BFLAME_WATCHES: '1'
         run: |
-          python3 - <<'PYCODE'
-          import sys
-          import checkin_blackflame as b
-          try:
-              sess=b.login(); print('READ ONLY COINS',b.coins_now(),flush=True)
-              status,html=b.site('/dashboard');print('DASHBOARD HTTP',status,'bytes',len(html),flush=True)
-          except Exception as e:print('READ ONLY ERROR',type(e).__name__,str(e)[:100],flush=True);sys.exit(2)
-          PYCODE
+          python3 -m unittest -v test_blackflame
+          python3 checkin_blackflame.py
