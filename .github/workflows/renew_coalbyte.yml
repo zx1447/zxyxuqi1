@@ -1,0 +1,29 @@
+name: CoalByte Renew
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: coalbyte-renew
+  cancel-in-progress: false
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: coalbyte
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install WebSocket client
+        run: pip install -q websocket-client==1.9.0
+      - name: Guard tests
+        run: python3 -m unittest test_coalbyte_probe test_coalbyte_renew
+      - name: Check renewal and actual power status
+        env:
+          COALBYTE_EMAIL: ${{ secrets.COALBYTE_EMAIL }}
+        run: python3 coalbyte_renew.py
