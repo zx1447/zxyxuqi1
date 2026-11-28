@@ -1,0 +1,34 @@
+name: Acore temporary read-only inspection
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: acorehost
+      - name: Inspect read only
+        env:
+          ACORE_API_KEY: ${{ secrets.ACORE_API_KEY }}
+        run: |
+          python3 - <<'PYCODE'
+          import renew_acorehost as m
+          def summary(d):
+              if not isinstance(d,dict):return str(type(d).__name__)
+              if 'errors' in d:return str(d['errors'])[:200]
+              return str(d.get('message') or d.get('error') or '')[:200]
+          c,d=m.req('/api/client/servers',retries=1);print('LIST_HTTP',c,'ROOT_KEYS',list(d) if isinstance(d,dict) else '?',flush=True)
+          if c!=200:print('LIST_ERROR',summary(d));raise SystemExit(2)
+          servers=d.get('servers') or [];print('COUNT',len(servers))
+          for sv in servers:
+              uid=sv.get('uuid');print('SERVER',str(uid)[:8],sv.get('name'),'suspended',sv.get('is_suspended'),'list_keys',sorted(sv),flush=True)
+              for name,path in [('details',f'/api/client/servers/{uid}'),('resources',f'/api/client/servers/{uid}/resources')]:
+                  c,x=m.req(path,retries=1);print('GET',name,'HTTP',c,'ROOT_KEYS',list(x) if isinstance(x,dict) else '?',flush=True)
+                  if c!=200:print('ERROR',name,summary(x),flush=True)
+                  elif name=='resources':print('RESOURCES',x.get('resources'),flush=True)
+                  elif isinstance(x.get('server'),dict):print('DETAIL_KEYS',sorted(x['server']),'SUSPENDED',x['server'].get('is_suspended'),'EXPIRY_PARSED',m.expiry_from(x['server']),flush=True)
+          PYCODE
