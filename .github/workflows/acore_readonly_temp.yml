@@ -23,7 +23,7 @@ jobs:
               return str(d.get('message') or d.get('error') or '')[:200]
           c,d=m.req('/api/client/servers',retries=1);print('LIST_HTTP',c,'ROOT_KEYS',list(d) if isinstance(d,dict) else '?',flush=True)
           if c!=200:print('LIST_ERROR',summary(d));raise SystemExit(2)
-          servers=d.get('servers') or [];print('COUNT',len(servers))
+          servers=(d.get('servers') or {}).get('data') or [];print('COUNT',len(servers))
           for sv in servers:
               uid=sv.get('uuid');print('SERVER',str(uid)[:8],sv.get('name'),'suspended',sv.get('is_suspended'),'list_keys',sorted(sv),flush=True)
               for name,path in [('details',f'/api/client/servers/{uid}'),('resources',f'/api/client/servers/{uid}/resources')]:
