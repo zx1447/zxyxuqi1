@@ -1,0 +1,28 @@
+name: MineLy Keepalive
+on:
+  schedule:
+    - cron: '0 1 * * *' # 09:00 Asia/Shanghai (UTC+8)
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: minely-keepalive
+  cancel-in-progress: false
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: minely
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install HTTP client
+        run: pip install -q requests==2.32.5
+      - name: Check and start if offline
+        env:
+          MINELY_USERNAME: ${{ secrets.MINELY_USERNAME }}
+          MINELY_PASSWORD: ${{ secrets.MINELY_PASSWORD }}
+        run: python3 minely_keepalive.py
