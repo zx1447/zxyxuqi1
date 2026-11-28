@@ -1,9 +1,9 @@
 {
-  "action": "renewed",
-  "seconds_remaining": 8249,
-  "active_until": "2026-11-28T05:26:10.000Z",
+  "action": "wait",
+  "seconds_remaining": 24552,
+  "active_until": "2026-11-28T14:47:51.000Z",
   "can_renew": false,
-  "updated": "2026-11-27T21:26:19Z",
+  "updated": "2026-11-28T07:58:38Z",
   "solver": "browser",
   "proxy": true,
   "before_seconds": 0,
